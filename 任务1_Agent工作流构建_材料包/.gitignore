@@ -1,0 +1,14 @@
+# Local secrets and Streamlit configuration
+.env
+.streamlit/secrets.toml
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Locally generated experiment output
+outputs/
