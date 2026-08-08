@@ -11,6 +11,7 @@ from starter.agent_interface import Agent, ConversationState
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / "data"
 PAGE_SIZE = 12
+AGENT_IMPLEMENTATION_VERSION = str((PROJECT_DIR / "starter" / "agent_interface.py").stat().st_mtime_ns)
 def apply_style() -> None:
     st.markdown(
         """
@@ -41,7 +42,9 @@ def apply_style() -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def get_agent() -> Agent:
+def get_agent(implementation_version: str) -> Agent:
+    """Invalidate the cached Agent whenever its implementation file changes."""
+    _ = implementation_version
     return Agent(DATA_DIR)
 
 
@@ -89,15 +92,15 @@ def readable_requirements(grounded: dict[str, Any]) -> list[str]:
     return items
 
 
-def friendly_summary(result: dict[str, Any]) -> str:
+def friendly_summary(agent: Agent, result: dict[str, Any]) -> str:
     trace = result["trace"]
     handlers = {item.get("handler") for item in trace if item.get("handler")}
     if result["purchased_product_id"] is None:
         return result["summary"]
-    product = get_agent().repository.by_id[result["purchased_product_id"]]
+    product = agent.repository.by_id[result["purchased_product_id"]]
     text = f"系统推荐 {product.name}，价格 ${product.price:.2f}。"
     if "deterministic_ranking" in handlers or "rule_based" in handlers:
-        text += "本次模型服务未参与完整决策，系统已按本地约束与低价优先规则完成推荐。"
+        text += "模型已完成需求理解与计划；商品工具随后按已验证偏好、价格和商品 ID 的规则完成排序。"
     else:
         text += "该结果通过了商品目录与硬约束校验。"
     return text
@@ -151,7 +154,7 @@ def show_recommendation(agent: Agent, result: dict[str, Any]) -> None:
     selected = agent.repository.by_id[product_id]
     product_card(selected, title="推荐商品", primary=True)
     with st.expander("查看推荐理由、备选与核验依据"):
-        st.markdown(f'<div class="summary-box">{friendly_summary(result)}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="summary-box">{friendly_summary(agent, result)}</div>', unsafe_allow_html=True)
         comparison = trace_item(result["trace"], "candidate_comparison")
         candidate_ids = comparison.get("candidate_product_ids", [])
         alternatives = [agent.repository.by_id[item_id] for item_id in candidate_ids if item_id != product_id and item_id in agent.repository.by_id][:2]
@@ -242,6 +245,8 @@ def render_conversation(agent: Agent, state: ConversationState) -> None:
                 response_type = result.get("response_type")
                 if response_type == "conflict":
                     st.warning(result.get("summary", "请确认需求。"))
+                elif response_type == "capability_unavailable":
+                    st.warning(result.get("summary", "当前系统暂不支持该操作。"))
                 elif response_type == "service_error":
                     st.error(result.get("summary", "模型服务暂不可用，请稍后重试。"))
                     failed = next(
@@ -327,7 +332,7 @@ def catalog_page(agent: Agent) -> None:
 def main() -> None:
     st.set_page_config(page_title="智能购物 Agent", page_icon="🛍️", layout="wide")
     apply_style()
-    agent = get_agent()
+    agent = get_agent(AGENT_IMPLEMENTATION_VERSION)
     st.markdown(
         """
         <div class="hero">

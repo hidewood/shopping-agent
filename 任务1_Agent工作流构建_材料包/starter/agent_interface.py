@@ -4,7 +4,7 @@ from __future__ import annotations
 
 The workflow is intentionally kept here so `Agent(data_dir).run(instruction)` is
 self-contained: configuration, structured prompts, catalog grounding, deterministic
-constraint checks, and DeepSeek-backed candidate decisions all live in this file.
+constraint checks, and deterministic candidate ranking all live in this file.
 """
 
 # ===== config.py =====
@@ -48,7 +48,7 @@ class Settings:
             raise ConfigurationError("AGENT_MAX_CANDIDATES must be an integer.") from exc
 
         try:
-            timeout_seconds = max(1.0, float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "20")))
+            timeout_seconds = max(1.0, float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "45")))
         except ValueError as exc:
             raise ConfigurationError("DEEPSEEK_TIMEOUT_SECONDS must be a number.") from exc
         try:
@@ -215,6 +215,38 @@ CATALOG_OPERATIONS = {
     "price_extreme",
 }
 
+PLAN_GOALS = {"chat", "information", "selection", "action"}
+PLAN_TARGETS = {"none", "catalog", "product", "transaction"}
+TRANSACTION_ACTIONS = {"order.create", "order.cancel", "payment.create"}
+CAPABILITY_REGISTRY = {
+    "catalog.read": "supported",
+    "recommendation.generate": "supported",
+    "order.create": "unsupported",
+    "order.cancel": "unsupported",
+    "payment.create": "unsupported",
+}
+
+
+@dataclass(frozen=True)
+class RecommendationPolicy:
+    """Product policy, not an LLM judgement, for when a selection may be made."""
+
+    allow_type_only: bool = False
+    allow_explicitly_open: bool = True
+
+    def is_ready(self, requirement: ShoppingRequirement, selection_mode: str) -> bool:
+        if not requirement.item_type.raw_value:
+            return False
+        if selection_mode == "explicitly_open" and self.allow_explicitly_open:
+            return True
+        if self.allow_type_only:
+            return True
+        return bool(
+            requirement.price_constraint.value is not None
+            or requirement.manufacturer.raw_value
+            or requirement.concepts
+        )
+
 
 @dataclass
 class TurnPlan:
@@ -225,20 +257,33 @@ class TurnPlan:
     and all catalog facts.
     """
 
-    intent: str
+    goal: str
+    target: str
     customer_reply: str | None = None
     requirement: ShoppingRequirement | None = None
     catalog_operations: list[str] = field(default_factory=list)
     state_action: str = "none"
+    selection_mode: str | None = None
+    action: str | None = None
+    goal_evidence: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Any) -> "TurnPlan":
         if not isinstance(data, dict):
             raise LLMResponseError("Turn plan must be a JSON object.", error_code="invalid_model_output")
-        intent = _optional_text(data.get("intent"))
-        valid_intents = {"chat", "catalog", "recommendation", "product_detail", "product_comparison"}
-        if intent not in valid_intents:
-            raise LLMResponseError("Turn plan must contain a valid intent.", error_code="invalid_model_output")
+        legacy_intent = _optional_text(data.get("intent"))
+        goal = _optional_text(data.get("goal"))
+        target = _optional_text(data.get("target"))
+        if goal is None and legacy_intent is not None:
+            goal, target = {
+                "chat": ("chat", "none"),
+                "catalog": ("information", "catalog"),
+                "recommendation": ("selection", "catalog"),
+                "product_detail": ("information", "product"),
+                "product_comparison": ("information", "product"),
+            }.get(legacy_intent, (None, None))
+        if goal not in PLAN_GOALS or target not in PLAN_TARGETS:
+            raise LLMResponseError("Turn plan must contain valid goal and target values.", error_code="invalid_model_output")
 
         reply = _optional_text(data.get("customer_reply"))
         raw_requirement = data.get("requirement")
@@ -256,20 +301,49 @@ class TurnPlan:
             raise LLMResponseError("Turn plan contains an unsupported catalog operation.", error_code="invalid_model_output")
 
         state_action = _optional_text(data.get("state_action")) or "none"
-        if state_action not in {"none", "merge"}:
+        if state_action not in {"none", "merge", "replace"}:
             raise LLMResponseError("Turn plan has an invalid state_action.", error_code="invalid_model_output")
-        if intent == "chat":
-            if not reply or requirement is not None or operations or state_action != "none":
+        selection_mode = _optional_text(data.get("selection_mode"))
+        if selection_mode is None and goal == "selection" and legacy_intent is not None:
+            selection_mode = "criteria"
+        if selection_mode not in {None, "criteria", "explicitly_open"}:
+            raise LLMResponseError("Turn plan has an invalid selection_mode.", error_code="invalid_model_output")
+        action = _optional_text(data.get("action"))
+        evidence = data.get("goal_evidence", [])
+        if evidence is None:
+            evidence = []
+        if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
+            raise LLMResponseError("goal_evidence must be an array of strings.", error_code="invalid_model_output")
+        evidence = _deduplicate(item.strip() for item in evidence if item.strip())
+
+        if goal == "chat":
+            if target != "none" or not reply or requirement is not None or operations or state_action != "none" or action:
                 raise LLMResponseError("A chat plan may only contain a customer reply.", error_code="invalid_model_output")
-        elif intent == "recommendation":
-            if reply is not None or requirement is None or operations or state_action != "merge":
-                raise LLMResponseError("A recommendation plan must contain requirements and merge state.", error_code="invalid_model_output")
-        elif intent == "catalog":
-            if reply is not None or requirement is None or not operations or state_action != "none":
-                raise LLMResponseError("A catalog plan must contain filters and one or more operations.", error_code="invalid_model_output")
-        elif reply is not None or requirement is not None or operations or state_action != "none":
-            raise LLMResponseError("A product detail/comparison plan contains incompatible fields.", error_code="invalid_model_output")
-        return cls(intent, reply, requirement, operations, state_action)
+        elif goal == "selection":
+            if target != "catalog" or reply is not None or requirement is None or operations or state_action not in {"merge", "replace"} or action or selection_mode is None:
+                raise LLMResponseError("A selection plan must contain requirements and a valid state transition.", error_code="invalid_model_output")
+        elif goal == "information":
+            if reply is not None or state_action != "none" or action:
+                raise LLMResponseError("An information plan may not reply directly or mutate state.", error_code="invalid_model_output")
+            if target == "catalog" and (requirement is None or not operations):
+                raise LLMResponseError("Catalog information requires filters and operations.", error_code="invalid_model_output")
+            if target != "catalog" and (requirement is not None or operations):
+                raise LLMResponseError("Product information plan contains incompatible fields.", error_code="invalid_model_output")
+        else:  # action
+            if target != "transaction" or reply is not None or requirement is not None or operations or state_action != "none" or action not in TRANSACTION_ACTIONS:
+                raise LLMResponseError("An action plan must request a supported action vocabulary.", error_code="invalid_model_output")
+        return cls(goal, target, reply, requirement, operations, state_action, selection_mode, action, evidence)
+
+    @property
+    def intent(self) -> str:
+        """Compatibility label for trace consumers while the runtime dispatches on goal/target."""
+        if self.goal == "chat":
+            return "chat"
+        if self.goal == "selection":
+            return "recommendation"
+        if self.goal == "action":
+            return "action"
+        return "catalog" if self.target == "catalog" else "product_information"
 
 
 @dataclass
@@ -285,8 +359,29 @@ class ConversationEvent:
 
 
 @dataclass
+class TaskContext:
+    """Explicit, compact task state kept alongside the replayable requirement log.
+
+    Requirements answer *what* the user is shopping for.  This context answers
+    *where* the conversation is in the workflow, without letting a read-only
+    catalog question overwrite an unfinished selection task.
+    """
+
+    active_task: str = "none"  # none | selection | information | action
+    selection_phase: str = "idle"  # idle | collecting | recommended | no_match
+    selected_product_id: str | None = None
+    candidate_product_ids: list[str] = field(default_factory=list)
+    last_information_target: str | None = None  # catalog | product | comparison
+    last_information_operations: list[str] = field(default_factory=list)
+    last_action: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ConversationState:
-    """Serializable transcript plus shopping-only pending state and derived constraints."""
+    """Serializable transcript plus independent selection and catalog-query contexts."""
 
     conversation_id: str = field(default_factory=lambda: uuid4().hex[:12])
     events: list[ConversationEvent] = field(default_factory=list)
@@ -294,6 +389,8 @@ class ConversationState:
     pending_fields: list[str] = field(default_factory=list)
     status: str = "collecting"
     turn_count: int = 0
+    last_catalog_context: dict[str, Any] | None = None
+    task_context: TaskContext = field(default_factory=TaskContext)
 
     def add_event(self, event_type: str, payload: dict[str, Any]) -> None:
         self.events.append(ConversationEvent(self.turn_count, event_type, payload))
@@ -306,6 +403,8 @@ class ConversationState:
             "pending_fields": list(self.pending_fields),
             "status": self.status,
             "turn_count": self.turn_count,
+            "last_catalog_context": dict(self.last_catalog_context or {}),
+            "task_context": self.task_context.to_dict(),
         }
 
 
@@ -330,6 +429,8 @@ class GroundedRequirement:
 
 @dataclass
 class PurchaseDecision:
+    """Auditable output of the deterministic candidate-ranking policy."""
+
     purchased_product_id: str | None
     reason: str
     tradeoffs: list[str] = field(default_factory=list)
@@ -588,11 +689,7 @@ class ProductRepository:
             for product in after_price
             if self._has_all_tags(product, requirement.required_tags)
         ]
-        ranked = sorted(
-            after_tags,
-            key=lambda product: self._score(product, requirement),
-            reverse=True,
-        )
+        ranked = self.rank_candidates(after_tags, requirement)
         return ranked, {
             "total_products": len(initial),
             "after_item_type": len(after_type),
@@ -713,9 +810,18 @@ class ProductRepository:
         return cls.preference_score(first, requirement) == cls.preference_score(second, requirement)
 
     @classmethod
-    def _score(cls, product: Product, requirement: GroundedRequirement) -> tuple[int, int, float]:
-        # Price resolves ties only after grounded soft preferences.
-        return (*cls.preference_score(product, requirement), -product.price)
+    def ranking_key(
+        cls, product: Product, requirement: GroundedRequirement
+    ) -> tuple[int, int, float, str]:
+        """Stable policy after hard filtering: preferences, price, then product ID."""
+        preferred_manufacturer, preferred_tags = cls.preference_score(product, requirement)
+        return (-preferred_manufacturer, -preferred_tags, product.price, product.product_id)
+
+    @classmethod
+    def rank_candidates(
+        cls, products: Iterable[Product], requirement: GroundedRequirement
+    ) -> list[Product]:
+        return sorted(products, key=lambda product: cls.ranking_key(product, requirement))
 
 
 # ===== prompts.py =====
@@ -728,31 +834,51 @@ TURN_PLANNER_SYSTEM_PROMPT = """You are the single-turn planner for a Chinese sh
 Translate exactly the latest customer message into one valid JSON object and no Markdown. Python, not you,
 will execute catalog access, state updates, and product selection. The exact keys are:
 
-intent (chat | catalog | recommendation | product_detail | product_comparison),
-customer_reply (string or null), requirement (object or null),
-catalog_operations (array), state_action (none | merge).
+goal (chat | information | selection | action), target (none | catalog | product | transaction),
+customer_reply (string or null), requirement (object or null), catalog_operations (array),
+state_action (none | merge | replace), selection_mode (criteria | explicitly_open | null),
+action (order.create | order.cancel | payment.create | null), goal_evidence (array of exact user substrings).
 
-Use chat only when the latest message needs no catalog fact. Set customer_reply to concise natural Chinese,
-requirement to null, catalog_operations to [], and state_action to "none". Answer the latest message only;
+Use goal=chat and target=none only when the latest message needs no catalog fact or external action. Set
+customer_reply to concise natural Chinese, requirement to null, catalog_operations to [], state_action to
+"none", selection_mode/action to null. Answer the latest message only;
 do not mention a previous failure or shopping condition unless the latest message explicitly refers to it.
 
-Use catalog when the user asks verifiable local-catalog facts. Set customer_reply to null, state_action to
-"none", and provide requirement as filters. catalog_operations is one or more of: count,
+Use goal=information and target=catalog when the user asks verifiable local-catalog facts. Set customer_reply
+to null, state_action to "none", action/selection_mode to null, and provide requirement as filters.
+catalog_operations is one or more of: count,
 group_by_item_type, group_by_manufacturer, group_by_tag, list, price_range, price_extreme.
 Choose every operation needed by a compound question. Availability needs count; "which styles" or "which
 tags" needs group_by_tag; a question can need both. Catalog queries never change a pending recommendation.
+When a short catalog follow-up omits its scope (for example "价位呢？"), use last_catalog_context only as
+the scope of that read-only query; never merge it into active_selection_context.
+task_context describes the current workflow phase and focus product(s). Use it only to resolve an
+elliptical follow-up; do not treat a prior recommendation as a new purchase request by itself.
 
-Use recommendation when the user asks to choose, buy, find, change, or continue choosing a product.
-Set customer_reply to null, catalog_operations to [], state_action to "merge", and provide requirement.
-Use product_detail or product_comparison only for one or multiple explicit product IDs respectively; all
-other fields must be null/empty and state_action must be "none".
+Use goal=selection and target=catalog only when the user explicitly asks to choose/recommend a product, or
+clearly answers a pending selection question. Set customer_reply to null, catalog_operations to [],
+and provide requirement. Use state_action="merge" only to refine the current selection; use
+state_action="replace" when the latest request clearly starts a new selection, especially when it names a
+different product type. selection_mode is "criteria" when the user specifies selection criteria, or
+"explicitly_open" only when they clearly permit an unconstrained/default choice.
+goal_evidence must quote the exact user substring that authorizes selection; when continuing a pending
+selection question, use an empty array.
 
-requirement is null except for catalog and recommendation. When present, its exact keys are item_type,
+Use goal=information and target=product for an explicit product-detail question or comparison. All fields
+except goal, target, goal_evidence must be null/empty and state_action must be "none". Use goal=action and
+target=transaction for order, payment, or cancellation requests, set action to the matching operation, and
+leave all other fields null/empty. Never convert a transaction request containing a product ID into product
+detail or selection. Product IDs are validated by Python.
+
+requirement is null except for catalog information and selection. When present, its exact keys are item_type,
 manufacturer, price_constraint, concepts, needs_clarification, clarification_question. item_type and
 manufacturer are objects with raw_value, constraint_strength, catalog_hint. price_constraint is an object
 with operator and value or null. Each concept has raw_value, kind, constraint_strength, catalog_tag_hints.
 constraint_strength is hard or preference. Product type and budget are hard. Style, visual motif, aesthetics,
-use case, and suitability are preferences unless explicitly mandatory. A catalog query treats its stated
+use case, and suitability are preferences only when the user expresses them as a preference (for example
+"喜欢", "优先", "prefer"). When a theme or style directly describes the item requested in the main clause
+(for example "想买纽约风的衣服" or "a Beach themed mug"), it is hard even without words such as
+"必须". A catalog query treats its stated
 filters as hard in execution. catalog_hint and catalog_tag_hints must be exact supplied catalog values or
 null/an empty list; never invent catalog facts. Preserve Chinese raw wording and use supplied bilingual
 aliases only when their English canonical value exists in the catalog.
@@ -761,34 +887,18 @@ Do not invent inventory, orders, delivery, returns, policies, product IDs, or fa
 """
 
 
-DECISION_SYSTEM_PROMPT = """You are the product decision component of a Chinese shopping customer-service agent.
-Select a product only from the supplied candidates. Do not invent products, IDs, prices, tags,
-manufacturers, or features. The application has already enforced every grounded hard constraint.
-
-Use price, type, manufacturer, tags, name, and description to compare candidates against soft
-preferences. A semantic substitute can satisfy only a preference, never an unmet hard condition.
-When candidates satisfy the same grounded hard constraints and the same soft preferences, select
-the lower-priced product. Do not select a more expensive tied candidate merely because its name
-sounds more directly related to the preference.
-If the selected product is an approximate style/use-case match, set match_level to
-"closest_alternative" and clearly state the tradeoff. Otherwise use "exact_match".
-
-Write reason and tradeoffs in concise Chinese. Return one valid JSON object and no Markdown. Its exact keys are:
-purchased_product_id (string or null), reason (string), tradeoffs (array of strings),
-confidence (low, medium, or high), match_level (exact_match or closest_alternative).
-"""
-
-
 def turn_planner_messages(
     instruction: str,
     catalog: dict[str, list[str]],
     conversation_context: dict[str, Any],
     shopping_context: dict[str, Any],
+    catalog_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     payload = {
         "latest_user_message": instruction,
         "recent_customer_messages": conversation_context,
-        "shopping_followup_context": shopping_context,
+        "active_selection_context": shopping_context,
+        "last_catalog_context": catalog_context or {},
         "catalog": catalog,
         "bilingual_aliases": _bilingual_alias_catalog(catalog),
     }
@@ -798,28 +908,28 @@ def turn_planner_messages(
     ]
 
 
-def decision_messages(
-    instruction: str, requirements: dict[str, Any], candidates: list[dict[str, Any]]
-) -> list[dict[str, str]]:
-    compact_candidates = [
-        {
-            "product_id": product["product_id"],
-            "name": product["name"],
-            "item_type": product["item_type"],
-            "manufacturer": product["manufacturer"],
-            "price": product["price"],
-            "tags": product["tags"],
-            "description": product["description"],
-        }
-        for product in candidates
-    ]
+def turn_plan_repair_messages(raw_plan: Any, validation_error: str) -> list[dict[str, str]]:
+    """Ask the same API for one bounded protocol-only repair before any side effect."""
     payload = {
-        "user_request": instruction,
-        "grounded_requirements": requirements,
-        "candidates": compact_candidates,
+        "invalid_plan": raw_plan,
+        "validation_error": validation_error,
+        "required_contract": {
+            "goal": ["chat", "information", "selection", "action"],
+            "target": ["none", "catalog", "product", "transaction"],
+            "state_action": ["none", "merge", "replace"],
+            "selection_mode": ["criteria", "explicitly_open", None],
+            "action": ["order.create", "order.cancel", "payment.create", None],
+        },
     }
     return [
-        {"role": "system", "content": DECISION_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                "Repair the invalid shopping-agent plan into exactly one JSON object and no Markdown. "
+                "Do not answer the customer, invent catalog facts, or change the intended goal. "
+                "Return only a plan that satisfies the supplied contract."
+            ),
+        },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
 
@@ -964,12 +1074,18 @@ class ShoppingAgent:
                     "warning": str(exc),
                 }
             )
+            summary = (
+                "模型回复未通过工作流协议校验，已尝试一次自动修复但未成功；"
+                "本轮未执行商品检索或推荐，请稍后重试。"
+                if exc.error_code == "invalid_model_output"
+                else "模型服务暂不可用，未执行商品检索或推荐。请检查 API 配置或稍后重试。"
+            )
             return self._finish_turn(
                 state,
                 message,
                 None,
                 trace,
-                "模型服务暂不可用，未执行商品检索或推荐。请检查 API 配置或稍后重试。",
+                summary,
                 "service_error",
                 update_shopping_state=False,
             )
@@ -1005,7 +1121,7 @@ class ShoppingAgent:
 
         previous = self._reduce_requirement(state)
         plan = self._create_turn_plan(message, state, previous, trace)
-        if plan.intent == "chat":
+        if plan.goal == "chat":
             return self._finish_turn(
                 state,
                 message,
@@ -1015,12 +1131,19 @@ class ShoppingAgent:
                 "chat",
                 update_shopping_state=False,
             )
-        if plan.intent == "catalog":
+        if plan.goal == "action":
+            return self._handle_action_request(state, message, plan, trace)
+        if plan.goal == "information" and plan.target == "catalog":
             return self._handle_catalog_plan(state, message, plan, trace)
-        if plan.intent == "product_detail":
+        if plan.goal == "information" and plan.target == "product":
+            product_ids = self._product_ids_in_message(message)
+            if len(product_ids) >= 2:
+                return self._handle_product_comparison(state, message, trace)
             return self._handle_product_detail(state, message, trace)
-        if plan.intent == "product_comparison":
-            return self._handle_product_comparison(state, message, trace)
+        if plan.goal != "selection":
+            error = LLMResponseError("Turn plan could not be dispatched.", error_code="invalid_model_output")
+            error.workflow_trace = list(trace)
+            raise error
 
         conflicting_types = self._mentioned_item_types(message)
         if len(conflicting_types) > 1:
@@ -1069,31 +1192,24 @@ class ShoppingAgent:
                 != _normalize(previous.item_type.raw_value)
             )
         )
-        if has_item_type_change and not self._is_explicit_override(message):
-            return self._finish_turn(
-                state,
-                message,
-                None,
-                trace
-                + [
-                    {
-                        "step": "conflict_detection",
-                        "status": "confirmation_required",
-                        "previous_item_type": previous.item_type.raw_value,
-                        "new_item_type": parsed.item_type.raw_value,
-                        "previous_canonical_item_type": previous_item_type,
-                        "new_canonical_item_type": parsed_item_type,
-                    }
-                ],
-                f"此前的商品类型是 {previous.item_type.raw_value}，本轮又出现了 "
-                f"{parsed.item_type.raw_value}。如果你想更换类型，请明确回复“改成 "
-                f"{parsed.item_type.raw_value}”。",
-                "conflict",
-                pending_question=f"是保留 {previous.item_type.raw_value}，还是改成 {parsed.item_type.raw_value}？",
-                pending_fields=["item_type"],
+        # A selection request that explicitly names one new canonical type is a new task.
+        # Only two types in the *same* message are ambiguous; do not require users to know
+        # implementation-specific phrases such as "change to".
+        replace_selection = has_item_type_change or plan.state_action == "replace"
+        if replace_selection:
+            trace.append(
+                {
+                    "step": "selection_transition",
+                    "status": "replaced",
+                    "previous_item_type": previous.item_type.raw_value,
+                    "new_item_type": parsed.item_type.raw_value,
+                    "reason": "new_explicit_type" if has_item_type_change else "planner_replace",
+                }
             )
 
-        self._append_requirement_updates(state, parsed, previous, message, trace)
+        self._append_requirement_updates(
+            state, parsed, previous, message, trace, replace_selection=replace_selection
+        )
         requirement = self._reduce_requirement(state)
         trace.append(
             {
@@ -1103,9 +1219,14 @@ class ShoppingAgent:
             }
         )
 
-        if parsed.needs_clarification:
+        readiness_policy = RecommendationPolicy()
+        # The model may suggest a clarification question, but it must not veto a
+        # request that already satisfies the product-level readiness policy.
+        # Otherwise an occasional over-cautious `needs_clarification=true` makes
+        # identical, sufficient requests non-deterministically stop early.
+        if not readiness_policy.is_ready(requirement, plan.selection_mode or "criteria"):
             pending_fields = ["item_type"] if not requirement.item_type.raw_value else ["shopping_detail"]
-            question = parsed.clarification_question or "请补充预算、主题、品牌或商品类型等购买条件。"
+            question = parsed.clarification_question or "请补充预算、主题、品牌或用途；也可以明确说明没有特别偏好。"
             return self._finish_turn(
                 state,
                 message,
@@ -1144,9 +1265,7 @@ class ShoppingAgent:
                 "no_match",
             )
 
-        shortlisted = candidates[: self.max_candidates]
-        decision = self._make_decision(message, grounded, shortlisted, trace)
-        selected = self._validate_decision(decision, grounded, shortlisted, trace)
+        decision, selected = self._rank_candidates(grounded, candidates, trace)
         return self._finish_turn(
             state,
             message,
@@ -1155,6 +1274,40 @@ class ShoppingAgent:
             self._format_summary(selected, decision),
             "recommendation",
         )
+
+    def _handle_action_request(
+        self,
+        state: ConversationState,
+        message: str,
+        plan: TurnPlan,
+        trace: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Enforce capability boundaries before any external business action could occur."""
+        action = plan.action or ""
+        capability_status = CAPABILITY_REGISTRY.get(action, "unsupported")
+        trace.append(
+            {
+                "step": "capability_check",
+                "status": capability_status,
+                "action": action,
+                "target_product_ids": self._product_ids_in_message(message),
+            }
+        )
+        if capability_status != "supported":
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace,
+                "当前系统支持商品查询、比较和推荐，暂不支持创建订单、支付或取消订单。"
+                "我可以为你查看该商品详情或继续比较商品。",
+                "capability_unavailable",
+                update_shopping_state=False,
+                catalog_data={"kind": "capability", "action": action, "status": capability_status},
+            )
+        error = LLMResponseError("No transaction executor is registered.", error_code="capability_unavailable")
+        error.workflow_trace = list(trace)
+        raise error
 
     def _handle_catalog_plan(
         self,
@@ -1170,15 +1323,53 @@ class ShoppingAgent:
             error.workflow_trace = list(trace)
             raise error
         self._enforce_catalog_query_filters(filters)
+        state.last_catalog_context = {
+            "filters": filters.to_dict(),
+            "catalog_operations": list(plan.catalog_operations),
+        }
         grounded = self.repository.ground(filters)
+        resolution_statuses = self._catalog_resolution_statuses(grounded)
+        unresolved_concepts = [
+            status["raw_value"]
+            for status in resolution_statuses
+            if status["field"] == "concept" and status["status"] == "unresolved"
+        ]
+        ambiguous_statuses = [
+            status
+            for status in resolution_statuses
+            if status["field"] == "concept" and status["status"] == "ambiguous"
+        ]
+        ambiguous_concepts = [status["raw_value"] for status in ambiguous_statuses]
+        # An unknown catalog-query facet means "cannot verify", not "known value with zero matches".
+        # Keep independently resolved filters (for example shirt) and use them to show valid alternatives.
+        if unresolved_concepts:
+            grounded.unresolved_hard_constraints = [
+                issue
+                for issue in grounded.unresolved_hard_constraints
+                if not any(f"“{raw_value}”" in issue for raw_value in unresolved_concepts)
+            ]
+        # Several canonical tags for one user phrase are an ambiguity, not an AND filter.
+        # Remove only the ambiguous phrase's tags, retain independent resolved constraints,
+        # and present the verified catalog facets for the user to choose from.
+        if ambiguous_statuses:
+            ambiguous_tags = {
+                value
+                for status in ambiguous_statuses
+                for value in status["canonical_values"]
+            }
+            grounded.required_tags = [tag for tag in grounded.required_tags if tag not in ambiguous_tags]
+        effective_operations = list(plan.catalog_operations)
+        if (unresolved_concepts or ambiguous_concepts) and "group_by_tag" not in effective_operations:
+            effective_operations.append("group_by_tag")
         products, counts = self.repository.retrieve(grounded)
         trace.extend(
             [
                 {
                     "step": "catalog_query_grounding",
                     "status": "completed",
-                    "catalog_operations": list(plan.catalog_operations),
+                    "catalog_operations": effective_operations,
                     "grounded_requirements": grounded.to_dict(),
+                    "resolution_statuses": resolution_statuses,
                 },
                 {
                     "step": "catalog_query_retrieval",
@@ -1197,18 +1388,27 @@ class ShoppingAgent:
                 self._no_match_summary(grounded),
                 "catalog_query",
                 update_shopping_state=False,
-                catalog_data={"kind": "catalog_query", "operations": plan.catalog_operations, "products": [], "total_count": 0},
+                catalog_data={"kind": "catalog_query", "operations": effective_operations, "products": [], "total_count": 0, "resolution_statuses": resolution_statuses},
             )
 
         scope = self._catalog_scope_label(grounded)
         summaries: list[str] = []
         data: dict[str, Any] = {
             "kind": "catalog_query",
-            "operations": list(plan.catalog_operations),
+            "operations": effective_operations,
             "total_count": len(products),
             "facets": {},
+            "resolution_statuses": resolution_statuses,
         }
-        if "count" in plan.catalog_operations:
+        if unresolved_concepts:
+            summaries.append("目录中没有可验证的对应标签：" + "、".join(unresolved_concepts))
+        if ambiguous_statuses:
+            choices = "；".join(
+                f"{status['raw_value']} 可对应 " + "、".join(status["canonical_values"])
+                for status in ambiguous_statuses
+            )
+            summaries.append("该表达存在多个目录对应值，未将它们同时作为筛选条件：" + choices)
+        if "count" in effective_operations:
             summaries.append(f"当前本地商品库中{scope}共有 {len(products)} 件商品")
         facet_specs = {
             "group_by_item_type": ("item_type", "商品类型", lambda product: product.item_type),
@@ -1216,7 +1416,7 @@ class ShoppingAgent:
             "group_by_tag": ("tag", "风格/标签", None),
         }
         for operation, (field, label, getter) in facet_specs.items():
-            if operation not in plan.catalog_operations:
+            if operation not in effective_operations:
                 continue
             values: dict[str, int] = {}
             if getter is None:
@@ -1234,30 +1434,30 @@ class ShoppingAgent:
             preview = "、".join(f"{value}（{count} 件）" for value, count in list(ordered.items())[:12])
             suffix = "等" if len(ordered) > 12 else ""
             summaries.append(f"{label}包括 {preview}{suffix}" if preview else f"未发现可用{label}")
-        if "price_range" in plan.catalog_operations:
+        if "price_range" in effective_operations:
             lowest = min(products, key=lambda product: product.price)
             highest = max(products, key=lambda product: product.price)
             data["price_range"] = {"lowest": lowest.to_dict(), "highest": highest.to_dict()}
             data["lowest"] = lowest.to_dict()
             data["highest"] = highest.to_dict()
-            if len(plan.catalog_operations) == 1:
+            if len(effective_operations) == 1:
                 data["kind"] = "price_range"
             summaries.append(f"价格范围为 ${lowest.price:.2f} 至 ${highest.price:.2f}")
-        if "price_extreme" in plan.catalog_operations:
+        if "price_extreme" in effective_operations:
             most_expensive = bool(re.search(r"最贵|最高|贵的|most expensive|highest", message.casefold()))
             selected = max(products, key=lambda product: product.price) if most_expensive else min(products, key=lambda product: product.price)
             data["price_extreme"] = selected.to_dict()
             data["products"] = [selected.to_dict()]
-            if len(plan.catalog_operations) == 1:
+            if len(effective_operations) == 1:
                 data["kind"] = "price_extreme"
             summaries.append(f"{'最贵' if most_expensive else '最便宜'}的是 {selected.name}（{selected.product_id}），价格 ${selected.price:.2f}")
-        if "list" in plan.catalog_operations:
+        if "list" in effective_operations:
             visible = products[:5]
             data["products"] = [product.to_dict() for product in visible]
             summaries.append(f"以下展示价格较低的前 {len(visible)} 件")
-            if len(plan.catalog_operations) == 1:
+            if len(effective_operations) == 1:
                 data["kind"] = "product_list"
-        if set(plan.catalog_operations).issubset({"count", "group_by_item_type"}):
+        if set(effective_operations).issubset({"count", "group_by_item_type"}):
             data["kind"] = "catalog_overview"
         summary = "；".join(summaries) + "。"
         return self._finish_turn(
@@ -1363,6 +1563,25 @@ class ShoppingAgent:
             concept.constraint_strength = "hard"
 
     @staticmethod
+    def _catalog_resolution_statuses(grounded: GroundedRequirement) -> list[dict[str, Any]]:
+        """Expose whether each catalog concept was resolved, unresolved, or ambiguous."""
+        statuses: list[dict[str, Any]] = []
+        for mapping in grounded.mappings:
+            if mapping.get("field") != "concept":
+                continue
+            values = list(mapping.get("canonical_values") or [])
+            status = "resolved" if len(values) == 1 else "ambiguous" if len(values) > 1 else "unresolved"
+            statuses.append(
+                {
+                    "field": "concept",
+                    "raw_value": mapping.get("raw_value", ""),
+                    "status": status,
+                    "canonical_values": values,
+                }
+            )
+        return statuses
+
+    @staticmethod
     def _product_ids_in_message(message: str) -> list[str]:
         return _deduplicate(match.upper() for match in re.findall(r"\bP\d{4}\b", message, flags=re.IGNORECASE))
 
@@ -1394,6 +1613,8 @@ class ShoppingAgent:
         previous: ShoppingRequirement,
         message: str,
         trace: list[dict[str, Any]],
+        *,
+        replace_selection: bool = False,
     ) -> None:
         """Translate a parsed turn into explicit set/replace/remove state events."""
         changes: list[dict[str, Any]] = []
@@ -1403,14 +1624,19 @@ class ShoppingAgent:
             state.add_event("constraint_update", event)
             changes.append(event)
 
+        base = previous
+        if replace_selection:
+            add("selection", "reset", {})
+            base = ShoppingRequirement()
+
         if parsed.item_type.raw_value:
-            operation = "replace" if previous.item_type.raw_value else "set"
+            operation = "replace" if base.item_type.raw_value else "set"
             add("item_type", operation, asdict(parsed.item_type))
         if parsed.manufacturer.raw_value:
-            operation = "replace" if previous.manufacturer.raw_value else "set"
+            operation = "replace" if base.manufacturer.raw_value else "set"
             add("manufacturer", operation, asdict(parsed.manufacturer))
         if parsed.price_constraint.value is not None:
-            operation = "replace" if previous.price_constraint.value is not None else "set"
+            operation = "replace" if base.price_constraint.value is not None else "set"
             add("price_constraint", operation, asdict(parsed.price_constraint))
 
         def concept_key(concept: Concept) -> tuple[str, ...]:
@@ -1419,7 +1645,7 @@ class ShoppingAgent:
                 return ("tags", *sorted(_normalize(tag) for tag in canonical_tags))
             return ("raw", _normalize(concept.raw_value))
 
-        previous_concepts = {concept_key(concept): concept for concept in previous.concepts}
+        previous_concepts = {concept_key(concept): concept for concept in base.concepts}
         for concept in parsed.concepts:
             existing = previous_concepts.get(concept_key(concept))
             if existing is None:
@@ -1436,7 +1662,7 @@ class ShoppingAgent:
         normalized_message = _normalize(message)
         mentioned_tags = {_normalize(tag) for tag in self.repository.tags_in_text(message)}
         if any(token in normalized_message for token in {"remove", "without", "cancel", "不要", "取消", "不需要"}):
-            for concept in previous.concepts:
+            for concept in base.concepts:
                 canonical_tags, _ = self.repository._ground_concept(concept)
                 if (
                     _normalize(concept.raw_value) in normalized_message
@@ -1458,7 +1684,10 @@ class ShoppingAgent:
             field_name = event.payload.get("field")
             operation = event.payload.get("operation")
             value = event.payload.get("value")
-            if field_name == "item_type" and operation in {"set", "replace"}:
+            if field_name == "selection" and operation == "reset":
+                requirement = ShoppingRequirement()
+                concepts = []
+            elif field_name == "item_type" and operation in {"set", "replace"}:
                 requirement.item_type = CatalogConstraint.from_value(value)
             elif field_name == "manufacturer" and operation in {"set", "replace"}:
                 requirement.manufacturer = CatalogConstraint.from_value(value)
@@ -1493,6 +1722,14 @@ class ShoppingAgent:
             state.pending_question = pending_question
             state.pending_fields = pending_fields or []
             state.status = "awaiting_user" if pending_question else response_type
+        self._update_task_context(
+            state,
+            response_type,
+            product_id,
+            trace,
+            catalog_data,
+            update_shopping_state=update_shopping_state,
+        )
         bare_result = self._result(message, product_id, trace, summary)
         bare_result["response_type"] = response_type
         if catalog_data is not None:
@@ -1501,6 +1738,69 @@ class ShoppingAgent:
         result = dict(bare_result)
         result["conversation_state"] = state.to_dict()
         return result
+
+    @staticmethod
+    def _update_task_context(
+        state: ConversationState,
+        response_type: str,
+        product_id: str | None,
+        trace: list[dict[str, Any]],
+        catalog_data: dict[str, Any] | None,
+        *,
+        update_shopping_state: bool,
+    ) -> None:
+        """Advance workflow state without conflating it with product requirements."""
+        context = state.task_context
+        transition: dict[str, Any] | None = None
+        if response_type in {"recommendation", "no_match"}:
+            comparison = next(
+                (item for item in reversed(trace) if item.get("step") == "candidate_comparison"),
+                {},
+            )
+            context.active_task = "selection"
+            context.selection_phase = "recommended" if response_type == "recommendation" else "no_match"
+            context.selected_product_id = product_id
+            context.candidate_product_ids = list(comparison.get("candidate_product_ids", []))
+            transition = {
+                "task": "selection",
+                "phase": context.selection_phase,
+                "selected_product_id": product_id,
+            }
+        elif response_type == "clarification" and update_shopping_state:
+            context.active_task = "selection"
+            context.selection_phase = "collecting"
+            context.selected_product_id = None
+            context.candidate_product_ids = []
+            transition = {"task": "selection", "phase": "collecting"}
+        elif response_type == "catalog_query":
+            operations = list((catalog_data or {}).get("operations", []))
+            context.last_information_target = "catalog"
+            context.last_information_operations = operations
+            if context.active_task == "none":
+                context.active_task = "information"
+            transition = {
+                "task": "information",
+                "target": "catalog",
+                "operations": operations,
+                "selection_preserved": context.selection_phase == "collecting",
+            }
+        elif response_type in {"product_detail", "product_comparison"}:
+            products = (catalog_data or {}).get("products", [])
+            context.last_information_target = "comparison" if response_type == "product_comparison" else "product"
+            context.last_information_operations = []
+            if context.active_task == "none":
+                context.active_task = "information"
+            transition = {
+                "task": "information",
+                "target": context.last_information_target,
+                "product_ids": [product.get("product_id") for product in products],
+            }
+        elif response_type == "capability_unavailable":
+            context.active_task = "action"
+            context.last_action = str((catalog_data or {}).get("action") or "") or None
+            transition = {"task": "action", "action": context.last_action, "phase": "unavailable"}
+        if transition is not None:
+            trace.append({"step": "task_state", "status": "updated", **transition})
 
     def _mentioned_item_types(self, message: str) -> list[str]:
         lower = message.casefold()
@@ -1546,20 +1846,44 @@ class ShoppingAgent:
             raise LLMResponseError(self._settings_error or "Model client was unavailable.", error_code="configuration")
         context = {"recent_messages": self._recent_conversation_messages(state)}
         shopping_context = self._shopping_context(state, previous)
+        planner_messages = turn_planner_messages(
+            message,
+            self.repository.catalog(),
+            context,
+            shopping_context,
+            state.last_catalog_context,
+        )
         try:
-            plan = TurnPlan.from_dict(
-                self.llm.chat_json(
-                    turn_planner_messages(message, self.repository.catalog(), context, shopping_context)
+            raw_plan = self.llm.chat_json(planner_messages)
+            try:
+                plan = TurnPlan.from_dict(raw_plan)
+            except LLMResponseError as exc:
+                if exc.error_code != "invalid_model_output":
+                    raise
+                trace.append(
+                    {
+                        "step": "turn_plan_repair",
+                        "status": "requested",
+                        "error_code": exc.error_code,
+                    }
                 )
-            )
+                repaired_plan = self.llm.chat_json(
+                    turn_plan_repair_messages(raw_plan, str(exc))
+                )
+                plan = TurnPlan.from_dict(repaired_plan)
+                trace.append({"step": "turn_plan_repair", "status": "completed"})
             trace.append(
                 {
                     "step": "turn_planning",
                     "status": "completed",
                     "handler": "deepseek",
+                    "goal": plan.goal,
+                    "target": plan.target,
                     "intent": plan.intent,
                     "catalog_operations": list(plan.catalog_operations),
                     "state_action": plan.state_action,
+                    "selection_mode": plan.selection_mode,
+                    "action": plan.action,
                 }
             )
             return plan
@@ -1590,6 +1914,7 @@ class ShoppingAgent:
             ),
             "pending_shopping_question": state.pending_question,
             "pending_shopping_fields": list(state.pending_fields),
+            "task_context": state.task_context.to_dict(),
         }
 
     @staticmethod
@@ -1607,116 +1932,90 @@ class ShoppingAgent:
         return messages[-limit:]
 
     @staticmethod
-    def _is_explicit_override(message: str) -> bool:
-        return bool(
-            re.search(
-                r"\b(?:actually|instead|change|switch|replace)\b|改成|换成|其实|不要.*要",
-                message.casefold(),
-            )
-        )
-
-    @staticmethod
     def _clear_generic_item_type(requirement: ShoppingRequirement) -> None:
         if _normalize(requirement.item_type.raw_value or "") in {"gift", "present", "something"}:
             requirement.item_type = CatalogConstraint()
 
-    def _make_decision(
+    def _rank_candidates(
         self,
-        instruction: str,
         requirement: GroundedRequirement,
         candidates: list[Product],
         trace: list[dict[str, Any]],
-    ) -> PurchaseDecision:
-        if self.llm is None:
-            raise LLMResponseError(self._settings_error or "Model client was unavailable.")
-        try:
-            decision = PurchaseDecision.from_dict(
-                self.llm.chat_json(
-                    decision_messages(
-                        instruction,
-                        requirement.to_dict(),
-                        [candidate.to_dict() for candidate in candidates],
-                    )
-                )
-            )
-            trace.append(
-                {
-                    "step": "candidate_comparison",
-                    "status": "completed",
-                    "handler": "deepseek",
-                    "candidate_product_ids": [candidate.product_id for candidate in candidates],
-                    "model_choice": decision.purchased_product_id,
-                    "match_level": decision.match_level,
-                }
-            )
-            return decision
-        except LLMResponseError as exc:
-            trace.append(
-                {
-                    "step": "candidate_comparison",
-                    "status": "failed",
-                    "handler": "deepseek",
-                    "warning": str(exc),
-                    "candidate_product_ids": [candidate.product_id for candidate in candidates],
-                }
-            )
-            exc.workflow_trace = list(trace)
-            raise
+    ) -> tuple[PurchaseDecision, Product]:
+        """Select only from tool-retrieved candidates with a stable, inspectable policy.
 
-    def _validate_decision(
-        self,
-        decision: PurchaseDecision,
-        requirement: GroundedRequirement,
-        candidates: list[Product],
-        trace: list[dict[str, Any]],
-    ) -> Product:
-        candidate_by_id = {candidate.product_id: candidate for candidate in candidates}
-        selected = candidate_by_id.get(decision.purchased_product_id or "")
-        if selected is not None:
-            top_ranked = candidates[0]
-            if (
-                selected.product_id != top_ranked.product_id
-                and selected.price > top_ranked.price
-                and self.repository.same_soft_preference_score(selected, top_ranked, requirement)
-            ):
-                model_choice = selected.product_id
-                decision.purchased_product_id = top_ranked.product_id
-                decision.reason = (
-                    "多个候选同样满足已对齐的偏好条件，系统按照低价优先规则选择了价格更低的商品。"
-                )
-                decision.tradeoffs = [
-                    f"模型原选择 {model_choice}，但其价格更高且没有额外的已对齐偏好优势。"
-                ]
-                trace.append(
-                    {
-                        "step": "decision_validation",
-                        "status": "corrected",
-                        "reason": "A lower-priced candidate has the same grounded soft-preference score.",
-                        "model_choice": selected.product_id,
-                        "selected_product_id": top_ranked.product_id,
-                    }
-                )
-                return top_ranked
-            trace.append(
-                {
-                    "step": "decision_validation",
-                    "status": "accepted",
-                    "selected_product_id": selected.product_id,
-                }
+        This deliberately runs *after* the LLM has produced and Python has validated
+        a plan.  It is not an offline substitute for a failed model request: without
+        a valid plan, execution stops before catalog retrieval.
+        """
+        ranked = self.repository.rank_candidates(candidates, requirement)
+        selected = ranked[0]
+        preferred_manufacturer, preferred_tags = self.repository.preference_score(
+            selected, requirement
+        )
+        unverified_preferences = _deduplicate(
+            str(mapping.get("raw_value"))
+            for mapping in requirement.mappings
+            if mapping.get("field") == "concept"
+            and mapping.get("constraint_strength") == "preference"
+            and not mapping.get("canonical_values")
+        )
+        applied_preferences: list[str] = []
+        if requirement.preferred_manufacturer:
+            applied_preferences.append(
+                "优先厂商" if preferred_manufacturer else "厂商偏好未满足"
             )
-            return selected
+        if requirement.preferred_tags:
+            applied_preferences.append(
+                f"命中 {preferred_tags} 个已验证偏好标签"
+            )
 
+        ranking_policy = ["已验证偏好", "价格从低到高", "商品 ID"]
+        reason = "已通过商品类型、预算、厂商和主题等硬条件校验。"
+        if applied_preferences:
+            reason += "在候选中按" + "、".join(applied_preferences) + "排序，再按价格和商品 ID 打破平局。"
+        else:
+            reason += "没有可区分候选的已验证偏好，因此按价格从低到高、商品 ID 的稳定规则排序。"
+        tradeoffs: list[str] = []
+        if unverified_preferences:
+            tradeoffs.append(
+                "以下偏好未能映射到商品库标签，未作为匹配事实："
+                + "、".join(unverified_preferences)
+            )
+        decision = PurchaseDecision(
+            purchased_product_id=selected.product_id,
+            reason=reason,
+            tradeoffs=tradeoffs,
+            confidence="medium" if unverified_preferences else "high",
+            match_level="closest_alternative" if unverified_preferences else "exact_match",
+        )
+        visible_candidates = ranked[: self.max_candidates]
+        trace.append(
+            {
+                "step": "candidate_comparison",
+                "status": "completed",
+                "handler": "deterministic_ranking",
+                "candidate_product_ids": [candidate.product_id for candidate in visible_candidates],
+                "eligible_product_count": len(ranked),
+                "ranking_policy": ranking_policy,
+                "selected_product_id": selected.product_id,
+                "selected_preference_score": {
+                    "preferred_manufacturer": preferred_manufacturer,
+                    "preferred_tags": preferred_tags,
+                },
+            }
+        )
         trace.append(
             {
                 "step": "decision_validation",
-                "status": "failed",
-                "reason": "Model selected no product or a product outside the eligible candidates.",
-                "model_choice": decision.purchased_product_id,
+                "status": "accepted",
+                "handler": "catalog_constraints",
+                "selected_product_id": selected.product_id,
+                "hard_constraints_verified": True,
+                "unverified_preferences": unverified_preferences,
             }
         )
-        error = LLMResponseError("Model decision did not select an eligible product.")
-        error.workflow_trace = list(trace)
-        raise error
+        return decision, selected
 
     @staticmethod
     def _format_summary(selected: Product, decision: PurchaseDecision) -> str:
@@ -1803,10 +2102,11 @@ class ShoppingAgent:
     def _enforce_primary_topic_constraints(
         self, instruction: str, requirement: ShoppingRequirement, trace: list[dict[str, Any]]
     ) -> None:
-        """Keep catalog tags named in the main request separate from later `prefer` clauses."""
+        """Promote concepts in the requested item's main clause, not later preference clauses."""
         primary_text = re.split(
-            r"\bprefer(?:red)?\b|优先", instruction, maxsplit=1, flags=re.IGNORECASE
+            r"\bprefer(?:red)?\b|喜欢|偏好|优先", instruction, maxsplit=1, flags=re.IGNORECASE
         )[0]
+        normalized_primary = _normalize(primary_text)
         primary_tags = self.repository.tags_in_text(primary_text)
         promoted: list[str] = []
         existing_hints = {
@@ -1837,6 +2137,20 @@ class ShoppingAgent:
                     )
                 )
                 promoted.append(tag)
+        # A model can map a Chinese phrase to an exact English tag outside our small
+        # handwritten alias table (for example, "纽约风" -> "New York").  Its role is
+        # determined by its position in the request, not by whether that translation
+        # happened to be listed in the alias table.
+        for concept in requirement.concepts:
+            raw_value = _normalize(concept.raw_value)
+            if (
+                raw_value
+                and raw_value in normalized_primary
+                and concept.catalog_tag_hints
+                and concept.constraint_strength != "hard"
+            ):
+                concept.constraint_strength = "hard"
+                promoted.append(concept.raw_value)
         if promoted:
             trace.append(
                 {

@@ -12,3 +12,15 @@ htmlcov/
 
 # Locally generated experiment output
 outputs/
+
+# Source copies of screenshots are staged under docs/screenshots/ for submission.
+photos/
+
+# Editor, operating-system and temporary files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp

@@ -34,6 +34,10 @@ class StubLLM:
     def chat_json(self, _messages: list[dict]) -> dict:
         self.calls.append(_messages)
         if "single-turn planner" in _messages[0]["content"]:
+            # Former fixtures may contain a second-stage model decision. Candidate
+            # ranking is now deterministic, so that legacy payload is not consumed.
+            while self.responses and "purchased_product_id" in self.responses[0]:
+                self.responses.pop(0)
             if self.responses and "workflow" in self.responses[0]:
                 coordinator = self.responses.pop(0)
                 if coordinator["workflow"] == "customer_chat":
@@ -107,21 +111,29 @@ class TestLLM:
     @staticmethod
     def plan_from_requirement(requirement: dict) -> dict:
         return {
-            "intent": "recommendation",
+            "goal": "selection",
+            "target": "catalog",
             "customer_reply": None,
             "requirement": requirement,
             "catalog_operations": [],
             "state_action": "merge",
+            "selection_mode": "criteria",
+            "action": None,
+            "goal_evidence": [],
         }
 
     @staticmethod
     def plan_for_product_task(task: str) -> dict:
         return {
-            "intent": task,
+            "goal": "information",
+            "target": "product",
             "customer_reply": None,
             "requirement": None,
             "catalog_operations": [],
             "state_action": "none",
+            "selection_mode": None,
+            "action": None,
+            "goal_evidence": [],
         }
 
     @staticmethod
@@ -135,11 +147,15 @@ class TestLLM:
             "price_extreme": ["price_extreme"],
         }[query["query_kind"]]
         return {
-            "intent": "catalog",
+            "goal": "information",
+            "target": "catalog",
             "customer_reply": None,
             "requirement": query["filters"],
             "catalog_operations": operations,
             "state_action": "none",
+            "selection_mode": None,
+            "action": None,
+            "goal_evidence": [],
         }
 
     def plan(self, messages: list[dict]) -> dict:
@@ -149,7 +165,11 @@ class TestLLM:
             reply = "我是智能购物 Agent，可以协助商品挑选与推荐。"
             if "天气" in lower:
                 reply = "很抱歉，我是购物助手，无法提供天气信息。请问有什么购物方面可以帮您？"
-            return {"intent": "chat", "customer_reply": reply, "requirement": None, "catalog_operations": [], "state_action": "none"}
+            return {
+                "goal": "chat", "target": "none", "customer_reply": reply,
+                "requirement": None, "catalog_operations": [], "state_action": "none",
+                "selection_mode": None, "action": None, "goal_evidence": [],
+            }
         task = TestLLM.shopping_task(messages)["shopping_task"]
         if task in {"product_detail", "product_comparison"}:
             return TestLLM.plan_for_product_task(task)
@@ -168,7 +188,17 @@ class TestLLM:
             operations = ["count", "group_by_item_type"]
         requirement["needs_clarification"] = False
         requirement["clarification_question"] = None
-        return {"intent": "catalog", "customer_reply": None, "requirement": requirement, "catalog_operations": operations, "state_action": "none"}
+        return {
+            "goal": "information",
+            "target": "catalog",
+            "customer_reply": None,
+            "requirement": requirement,
+            "catalog_operations": operations,
+            "state_action": "none",
+            "selection_mode": None,
+            "action": None,
+            "goal_evidence": [],
+        }
 
     def chat_json(self, messages: list[dict]) -> dict:
         system = messages[0]["content"]
@@ -203,21 +233,6 @@ class TestLLM:
             return {"query_kind": kind, "filters": filters}
         if "requirement-analysis worker" in system:
             return self._requirement(message)
-        if "product decision component" in system:
-            payload = json.loads(messages[-1]["content"])
-            product = payload["candidates"][0]
-            is_unverified_style = "disney-style" in payload["user_request"].casefold()
-            return {
-                "purchased_product_id": product["product_id"],
-                "reason": (
-                    "无法验证未映射的风格偏好，以下商品仅保证硬条件。"
-                    if is_unverified_style
-                    else "测试模型选择了已验证候选。"
-                ),
-                "tradeoffs": [],
-                "confidence": "high",
-                "match_level": "closest_alternative" if is_unverified_style else "exact_match",
-            }
         raise AssertionError("Unexpected test-model prompt")
 
     def _requirement(self, message: str) -> dict:
@@ -403,7 +418,27 @@ class ProductRepositoryTests(unittest.TestCase):
         agent.llm = TestLLM(agent.repository)
         result = agent.run("I want a Disney-style shirt under $30.")
         self.assertIsNotNone(result["purchased_product_id"])
-        self.assertIn("无法验证未映射的风格", result["summary"])
+        self.assertIn("未作为匹配事实", result["summary"])
+
+    def test_unverified_soft_preference_is_disclosed_by_deterministic_ranking(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        candidate = agent.repository.products[0]
+        requirement = GroundedRequirement(
+            mappings=[
+                {
+                    "field": "concept",
+                    "raw_value": "清新风格",
+                    "constraint_strength": "preference",
+                    "canonical_values": [],
+                }
+            ]
+        )
+        trace: list[dict] = []
+        decision, selected = agent._rank_candidates(requirement, [candidate], trace)
+        self.assertEqual(selected.product_id, candidate.product_id)
+        self.assertEqual(decision.match_level, "closest_alternative")
+        self.assertIn("清新风格", decision.tradeoffs[0])
+        self.assertEqual(trace[-1]["unverified_preferences"], ["清新风格"])
 
     def test_preferred_manufacturer_is_not_a_hard_filter(self) -> None:
         requirement = ShoppingRequirement(
@@ -496,9 +531,9 @@ class ProductRepositoryTests(unittest.TestCase):
         )
         result = agent.run("I need a mug under $30; prefer Ocean themed products.")
         self.assertEqual(result["purchased_product_id"], "P0005")
-        validation = next(step for step in result["trace"] if step["step"] == "decision_validation")
-        self.assertEqual(validation["status"], "corrected")
-        self.assertEqual(validation["selected_product_id"], "P0005")
+        comparison = next(step for step in result["trace"] if step["step"] == "candidate_comparison")
+        self.assertEqual(comparison["handler"], "deterministic_ranking")
+        self.assertEqual(comparison["selected_product_id"], "P0005")
 
     def test_agent_returns_starter_contract_with_api_stub(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -584,7 +619,7 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertEqual(grounded["grounded_requirements"]["required_tags"], ["Ocean"])
         self.assertEqual(grounded["grounded_requirements"]["preferred_tags"], [])
 
-    def test_invalid_model_decision_returns_service_error_and_rolls_back_turn_state(self) -> None:
+    def test_candidate_ranking_does_not_depend_on_a_model_product_id(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = StubLLM(
             [
@@ -603,12 +638,11 @@ class ProductRepositoryTests(unittest.TestCase):
         )
         state = ConversationState()
         result = agent.run_turn("I need a mug under $30", state)
-        self.assertEqual(result["response_type"], "service_error")
-        self.assertIsNone(result["purchased_product_id"])
-        self.assertFalse(any(event.event_type == "constraint_update" for event in state.events))
-        self.assertEqual(agent._reduce_requirement(state).item_type.raw_value, None)
-        self.assertIn("decision_validation", [step["step"] for step in result["trace"]])
-        self.assertEqual(result["trace"][-1]["step"], "model_service")
+        self.assertEqual(result["response_type"], "recommendation")
+        self.assertIsNotNone(result["purchased_product_id"])
+        self.assertEqual(agent._reduce_requirement(state).item_type.catalog_hint, "mug")
+        comparison = next(step for step in result["trace"] if step["step"] == "candidate_comparison")
+        self.assertEqual(comparison["handler"], "deterministic_ranking")
 
     def test_strict_price_operator_is_resolved_by_code(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -630,22 +664,18 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertEqual(grounded.preferred_tags, [])
         self.assertEqual(grounded.preferred_manufacturer, "Bayer-and-Sons")
 
-    def test_decision_failure_is_recorded_once(self) -> None:
+    def test_candidate_ranking_does_not_call_model_after_planning(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = FailingLLM()
         requirement = GroundedRequirement(required_tags=["Nature"])
         candidates, _ = self.repository.retrieve(requirement)
         trace: list[dict] = []
-        with self.assertRaises(LLMResponseError):
-            agent._make_decision("Find a Nature mug.", requirement, candidates, trace)
+        decision, selected = agent._rank_candidates(requirement, candidates, trace)
+        self.assertEqual(decision.purchased_product_id, selected.product_id)
         comparisons = [step for step in trace if step["step"] == "candidate_comparison"]
         self.assertEqual(len(comparisons), 1)
-        self.assertEqual(comparisons[0]["handler"], "deepseek")
-        self.assertEqual(comparisons[0]["status"], "failed")
-        self.assertEqual(
-            comparisons[0]["candidate_product_ids"],
-            [candidate.product_id for candidate in candidates],
-        )
+        self.assertEqual(comparisons[0]["handler"], "deterministic_ranking")
+        self.assertEqual(agent.llm.calls if hasattr(agent.llm, "calls") else [], [])
 
     def test_primary_topic_is_promoted_to_hard_constraint(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -703,17 +733,97 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertIsNone(result["purchased_product_id"])
         self.assertEqual(state.pending_fields, ["item_type"])
 
-    def test_type_change_requires_override_then_updates_state(self) -> None:
+    def test_explicit_new_type_starts_a_new_selection_without_keyword_override(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = TestLLM(agent.repository)
         state = ConversationState()
         agent.run_turn("I need a mug under $30.", state)
-        conflict = agent.run_turn("I need a shirt.", state)
-        updated = agent.run_turn("Actually, change to a shirt under $30.", state)
+        updated = agent.run_turn("I need a shirt under $30.", state)
         active = agent._reduce_requirement(state)
-        self.assertEqual(conflict["response_type"], "conflict")
         self.assertEqual(updated["response_type"], "recommendation")
         self.assertEqual(active.item_type.raw_value, "shirt")
+        self.assertEqual(active.price_constraint, PriceConstraint("<", 30))
+        transition = next(step for step in updated["trace"] if step["step"] == "selection_transition")
+        self.assertEqual(transition["status"], "replaced")
+
+    def test_mapped_chinese_main_theme_is_promoted_without_a_handwritten_alias(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        requirement = ShoppingRequirement(
+            concepts=[
+                Concept(
+                    raw_value="纽约风",
+                    kind="style",
+                    constraint_strength="preference",
+                    catalog_tag_hints=["New York"],
+                )
+            ]
+        )
+        trace: list[dict] = []
+        agent._enforce_primary_topic_constraints("我想买一件纽约风的衣服", requirement, trace)
+        self.assertEqual(requirement.concepts[0].constraint_strength, "hard")
+        self.assertIn("纽约风", trace[0]["promoted_to_hard_tags"])
+
+    def test_replacing_selection_discards_old_budget_and_theme(self) -> None:
+        def selection_plan(requirement: dict) -> dict:
+            return {
+                "goal": "selection", "target": "catalog", "customer_reply": None,
+                "requirement": requirement, "catalog_operations": [], "state_action": "merge",
+                "selection_mode": "criteria", "action": None, "goal_evidence": [],
+            }
+
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                selection_plan(
+                    {
+                        "item_type": {"raw_value": "衬衫", "constraint_strength": "hard", "catalog_hint": "shirt"},
+                        "manufacturer": None,
+                        "price_constraint": {"operator": "<=", "value": 30},
+                        "concepts": [{"raw_value": "纽约风", "kind": "style", "constraint_strength": "preference", "catalog_tag_hints": ["New York"]}],
+                        "needs_clarification": False, "clarification_question": None,
+                    }
+                ),
+                {"purchased_product_id": "P0939", "reason": "符合纽约风和预算。", "tradeoffs": [], "confidence": "high", "match_level": "exact_match"},
+                selection_plan(
+                    {
+                        "item_type": {"raw_value": "马克杯", "constraint_strength": "hard", "catalog_hint": "mug"},
+                        "manufacturer": None,
+                        "price_constraint": None,
+                        "concepts": [{"raw_value": "清新风格", "kind": "style", "constraint_strength": "preference", "catalog_tag_hints": []}],
+                        "needs_clarification": False, "clarification_question": None,
+                    }
+                ),
+                {"purchased_product_id": "P0005", "reason": "仅满足已验证的马克杯条件。", "tradeoffs": ["清新风格尚未映射到目录标签"], "confidence": "medium", "match_level": "closest_alternative"},
+            ]
+        )
+        state = ConversationState()
+        agent.run_turn("我想买一件纽约风的衬衫，预算30元以内", state)
+        result = agent.run_turn("推荐一个马克杯，我喜欢清新风格", state)
+        active = agent._reduce_requirement(state)
+        self.assertEqual(result["response_type"], "recommendation")
+        self.assertEqual(active.item_type.catalog_hint, "mug")
+        self.assertIsNone(active.price_constraint.value)
+        self.assertEqual([concept.raw_value for concept in active.concepts], ["清新风格"])
+        self.assertTrue(any(step["step"] == "selection_transition" for step in result["trace"]))
+
+    def test_invalid_turn_plan_is_repaired_once_before_catalog_execution(self) -> None:
+        valid_catalog_plan = {
+            "goal": "information", "target": "catalog", "customer_reply": None,
+            "requirement": {
+                "item_type": None, "manufacturer": None, "price_constraint": None,
+                "concepts": [], "needs_clarification": False, "clarification_question": None,
+            },
+            "catalog_operations": ["count", "group_by_item_type"], "state_action": "none",
+            "selection_mode": None, "action": None, "goal_evidence": [],
+        }
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM([{"goal": "information"}, valid_catalog_plan])
+        state = ConversationState()
+        result = agent.run_turn("那你们家还有什么商品吗", state)
+        self.assertEqual(result["response_type"], "catalog_query")
+        self.assertEqual(len(agent.llm.calls), 2)
+        self.assertTrue(any(step["step"] == "turn_plan_repair" and step["status"] == "completed" for step in result["trace"]))
+        self.assertEqual(state.last_catalog_context["catalog_operations"], ["count", "group_by_item_type"])
 
     def test_multiturn_states_do_not_leak_between_users(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -746,6 +856,195 @@ class ProductRepositoryTests(unittest.TestCase):
         result = agent.run_turn("我想买一件T恤", ConversationState())
         self.assertEqual(result["response_type"], "clarification")
         self.assertIn("预算", result["summary"])
+
+    def test_selection_readiness_overrides_an_overeager_model_plan(self) -> None:
+        """A type alone is not enough under the configured recommendation policy."""
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                {
+                    "goal": "selection",
+                    "target": "catalog",
+                    "customer_reply": None,
+                    "requirement": {
+                        "item_type": {"raw_value": "衬衫", "constraint_strength": "hard", "catalog_hint": "shirt"},
+                        "manufacturer": None,
+                        "price_constraint": None,
+                        "concepts": [],
+                        "needs_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "catalog_operations": [],
+                    "state_action": "merge",
+                    "selection_mode": "criteria",
+                    "action": None,
+                    "goal_evidence": ["我想买一件衬衫"],
+                }
+            ]
+        )
+        result = agent.run_turn("我想买一件衬衫", ConversationState())
+        self.assertEqual(result["response_type"], "clarification")
+        self.assertIn("预算", result["summary"])
+        self.assertFalse(any(step["step"] == "candidate_preparation" for step in result["trace"]))
+
+    def test_sufficient_requirements_override_an_overcautious_model_clarification(self) -> None:
+        """The policy, not a model flag, decides whether selection may execute."""
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                {
+                    "goal": "selection",
+                    "target": "catalog",
+                    "customer_reply": None,
+                    "requirement": {
+                        "item_type": {"raw_value": "mug", "constraint_strength": "hard", "catalog_hint": "mug"},
+                        "manufacturer": {"raw_value": "Bayer-and-Sons", "constraint_strength": "preference", "catalog_hint": "Bayer-and-Sons"},
+                        "price_constraint": None,
+                        "concepts": [
+                            {"raw_value": "Ocean", "kind": "theme", "constraint_strength": "hard", "catalog_tag_hints": ["Ocean"]}
+                        ],
+                        "needs_clarification": True,
+                        "clarification_question": "您的心理价位是多少呢？",
+                    },
+                    "catalog_operations": [],
+                    "state_action": "replace",
+                    "selection_mode": "criteria",
+                    "action": None,
+                    "goal_evidence": ["海洋主题的马克杯"],
+                }
+            ]
+        )
+        result = agent.run_turn("Buy an affordable mug related to Ocean; prefer Bayer-and-Sons if available.", ConversationState())
+        self.assertEqual(result["response_type"], "recommendation")
+        self.assertEqual(result["purchased_product_id"], "P0005")
+
+    def test_explicitly_open_selection_is_a_configured_exception_to_readiness(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                {
+                    "goal": "selection",
+                    "target": "catalog",
+                    "customer_reply": None,
+                    "requirement": {
+                        "item_type": {"raw_value": "衬衫", "constraint_strength": "hard", "catalog_hint": "shirt"},
+                        "manufacturer": None,
+                        "price_constraint": None,
+                        "concepts": [],
+                        "needs_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "catalog_operations": [],
+                    "state_action": "merge",
+                    "selection_mode": "explicitly_open",
+                    "action": None,
+                    "goal_evidence": ["不限预算和风格"],
+                },
+                {
+                    "purchased_product_id": "P0888",
+                    "reason": "用户已明确允许不限定预算和风格。",
+                    "tradeoffs": [],
+                    "confidence": "high",
+                    "match_level": "exact_match",
+                },
+            ]
+        )
+        result = agent.run_turn("我想买一件衬衫，不限预算和风格", ConversationState())
+        self.assertEqual(result["response_type"], "recommendation")
+        self.assertEqual(result["purchased_product_id"], "P0888")
+
+    def test_transaction_request_is_not_reinterpreted_as_product_detail(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                {
+                    "goal": "action",
+                    "target": "transaction",
+                    "customer_reply": None,
+                    "requirement": None,
+                    "catalog_operations": [],
+                    "state_action": "none",
+                    "selection_mode": None,
+                    "action": "order.create",
+                    "goal_evidence": ["下单 P1194"],
+                }
+            ]
+        )
+        state = ConversationState()
+        result = agent.run_turn("下单 P1194", state)
+        self.assertEqual(result["response_type"], "capability_unavailable")
+        self.assertIn("暂不支持创建订单", result["summary"])
+        self.assertFalse(any(event.event_type == "constraint_update" for event in state.events))
+        self.assertTrue(any(step["step"] == "capability_check" for step in result["trace"]))
+
+    def test_unknown_catalog_concept_reports_unverified_mapping_but_keeps_known_scope(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                {
+                    "goal": "information",
+                    "target": "catalog",
+                    "customer_reply": None,
+                    "requirement": {
+                        "item_type": {"raw_value": "衬衫", "constraint_strength": "hard", "catalog_hint": "shirt"},
+                        "manufacturer": None,
+                        "price_constraint": None,
+                        "concepts": [
+                            {"raw_value": "卡通风格", "kind": "style", "constraint_strength": "hard", "catalog_tag_hints": []}
+                        ],
+                        "needs_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "catalog_operations": ["count"],
+                    "state_action": "none",
+                    "selection_mode": None,
+                    "action": None,
+                    "goal_evidence": ["卡通风格的衬衫"],
+                }
+            ]
+        )
+        result = agent.run_turn("有卡通风格的衬衫吗", ConversationState())
+        self.assertEqual(result["response_type"], "catalog_query")
+        self.assertEqual(result["catalog_data"]["total_count"], 870)
+        self.assertIn("没有可验证的对应标签", result["summary"])
+        self.assertIn("tag", result["catalog_data"]["facets"])
+        self.assertEqual(result["catalog_data"]["resolution_statuses"][0]["status"], "unresolved")
+
+    def test_ambiguous_catalog_concept_is_not_treated_as_and_filter(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [
+                {
+                    "goal": "information",
+                    "target": "catalog",
+                    "customer_reply": None,
+                    "requirement": {
+                        "item_type": {"raw_value": "衬衫", "constraint_strength": "hard", "catalog_hint": "shirt"},
+                        "manufacturer": None,
+                        "price_constraint": None,
+                        "concepts": [
+                            {
+                                "raw_value": "自然相关", "kind": "style", "constraint_strength": "hard",
+                                "catalog_tag_hints": ["Nature", "Desert"],
+                            }
+                        ],
+                        "needs_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "catalog_operations": ["count"],
+                    "state_action": "none",
+                    "selection_mode": None,
+                    "action": None,
+                    "goal_evidence": ["自然相关的衬衫"],
+                }
+            ]
+        )
+        result = agent.run_turn("有自然相关的衬衫吗", ConversationState())
+        self.assertEqual(result["response_type"], "catalog_query")
+        self.assertEqual(result["catalog_data"]["total_count"], 870)
+        self.assertIn("多个目录对应值", result["summary"])
+        self.assertIn("tag", result["catalog_data"]["facets"])
+        self.assertEqual(result["catalog_data"]["resolution_statuses"][0]["status"], "ambiguous")
 
     def test_model_customer_service_route_returns_reply_without_retrieval(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -805,7 +1104,7 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertEqual(result["response_type"], "recommendation")
         self.assertEqual(result["purchased_product_id"], "P0005")
         self.assertEqual([step["step"] for step in result["trace"]].count("turn_planning"), 1)
-        self.assertEqual(len(agent.llm.calls), 2)  # one plan plus one candidate-comparison call
+        self.assertEqual(len(agent.llm.calls), 1)  # one plan; candidate ranking is deterministic
 
     def test_model_planned_clarification_is_shown_without_catalog_retrieval(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -874,7 +1173,8 @@ class ProductRepositoryTests(unittest.TestCase):
             [
                 {
                     "customer_reply": None,
-                }
+                },
+                {"customer_reply": None},
             ]
         )
         result = agent.run_turn("你好啊", ConversationState())
@@ -887,7 +1187,8 @@ class ProductRepositoryTests(unittest.TestCase):
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = StubLLM(
             [
-                {"requirement": {"item_type": {"raw_value": "hello", "constraint_strength": "hard", "catalog_hint": None}}}
+                {"requirement": {"item_type": {"raw_value": "hello", "constraint_strength": "hard", "catalog_hint": None}}},
+                {"requirement": {"item_type": {"raw_value": "hello", "constraint_strength": "hard", "catalog_hint": None}}},
             ]
         )
         result = agent.run_turn("hello", ConversationState())
@@ -1191,6 +1492,21 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertEqual(query["conversation_state"]["pending_fields"], ["shopping_detail"])
         self.assertEqual(follow_up["response_type"], "recommendation")
         self.assertEqual(agent._reduce_requirement(state).item_type.raw_value, "shirt")
+
+    def test_task_context_preserves_selection_while_browsing_catalog(self) -> None:
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = TestLLM(agent.repository)
+        state = ConversationState()
+        first = agent.run_turn("我想买一件T恤", state)
+        catalog = agent.run_turn("衬衫都有哪些价位？", state)
+        context = state.to_dict()["task_context"]
+        self.assertEqual(first["response_type"], "clarification")
+        self.assertEqual(catalog["response_type"], "catalog_query")
+        self.assertEqual(context["active_task"], "selection")
+        self.assertEqual(context["selection_phase"], "collecting")
+        self.assertEqual(context["last_information_target"], "catalog")
+        task_trace = next(step for step in catalog["trace"] if step["step"] == "task_state")
+        self.assertTrue(task_trace["selection_preserved"])
 
     def test_product_detail_uses_catalog_facts_without_recommendation(self) -> None:
         agent = ShoppingAgent(DATA_DIR)

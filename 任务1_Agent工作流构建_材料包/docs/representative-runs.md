@@ -1,125 +1,89 @@
-# 代表性运行记录
+# 代表性人工运行记录
 
-测试日期：2026-08-07。商品库：1,740 件商品。
+以下场景在 Streamlit 页面中人工执行。它们与 [test-cases.md](test-cases.md) 中的场景对应，用于补充自动化评测无法直接呈现的多轮交互和界面证据。
 
-## T01：主题映射与预算
+## R01：目录浏览不覆盖购物任务
 
-输入：`I need a Clothes themed shirt that costs less than $23.`
+输入：
 
-- 结果：推荐 `P1635 Small Clothes Shirt`，价格 `$16.99`。
-- 核验：商品类别为 shirt，标签包含 Clothes，价格严格低于 `$23`。
-- 结论：通过。
+```text
+我想买一件T恤
+衬衫有什么价位？
+预算低于20元
+```
 
-## T03：软偏好厂商
+结果：第一轮正常追问；第二轮返回 shirt 的真实价格范围；第三轮仍延续 T 恤任务并给出低于 20 的商品推荐。
 
-输入：`Buy an affordable mug related to Sunny; prefer Bayer-and-Sons if available.`
+核验：目录查询为只读任务，未清空待补充的选择状态。
 
-- 结果：推荐 `P0599 Ergonomic Flowers Mug`，价格 `$10.99`。
-- 核验：商品为 mug，标签包含 Sunny，厂商为 Bayer-and-Sons；该厂商存在满足其余条件的商品时被优先选择。
-- 结论：通过。
+![R01：目录查询与推荐状态隔离](screenshots/01-task-context-price-query.png)
 
-## T04：不存在的硬类别
+## R02：新类型自动开启新选择任务
 
-输入：`I need a camera under $100.`
+输入：
 
-- 结果：不购买，返回“商品类别 camera 无法映射到商品库类别”。
-- 核验：没有把 Camera 标签的 shirt 错误当作相机推荐。
-- 结论：通过。
+```text
+我想买一件纽约风的衬衫，预算30元以内
+推荐一个马克杯，我喜欢清新风格
+```
 
-## T05：官方品牌/IP 硬约束
+结果：第一轮推荐带 `New York` 标签的 shirt；第二轮直接切换为 mug 推荐，不要求使用“改成马克杯”的固定句式。
 
-输入：`I must buy an official Disney shirt under $30.`
+核验：旧的 shirt、预算和 New York 条件不会泄漏到 mug 任务；未映射的“清新风格”只可作为未验证偏好说明。
 
-- 结果：不购买，页面说明商品库无法满足 Disney 条件。
-- 核验：没有将普通 shirt 或风格相近商品伪装成 Disney 正版。
-- 结论：通过。
+![R02：跨类型新任务替换](screenshots/02-type-switch.png)
 
-## T07：不完整价格
+## R03：硬主题与优先厂商
 
-输入：`I need a shirt that costs less than .`
+输入：
 
-- 结果：请求补充金额，不进入检索和购买。
-- 结论：通过。
+```text
+我想买一个海洋主题的马克杯，预算低于30，优先 Bayer-and-Sons
+```
 
-## T08：信息不足的主动追问
+结果：推荐 `P0005 · Rustic Ocean Mug`，价格 `$9.99`，标签包含 `Ocean`，厂商为 `Bayer-and-Sons`。
 
-输入：`I want the best product.`
+核验：商品类型、主题、预算通过硬过滤；厂商为软偏好并在存在满足条件的候选时优先。
 
-- 结果：页面追问商品类型、风格、主题或预算。
-- 结论：通过；后续回答由多轮状态管理继续处理。
+![R03：优先厂商](screenshots/03-preferred-manufacturer.png)
 
-## M01：追问后的多轮补充
+## R04：软偏好参与确定性候选排序
 
-第 ① 轮输入：`I want a gift.`
+输入：
 
-- 结果：返回 `clarification`，询问商品类型是 mug 还是 shirt；未进入购买。
+```text
+我想买一个马克杯，预算低于30，优先海洋主题
+```
 
-第 ② 轮输入：`A mug under $30; prefer Ocean themed products.`
+结果：展开推荐依据后，页面展示候选商品、硬过滤数量和结构化 trace；海洋主题作为软偏好参与候选排序。
 
-- 结果：推荐 `P0005 Rustic Ocean Mug`，价格 `$9.99`。
-- 状态核验：事件日志先记录用户消息；第 ② 轮记录商品类型 mug、严格预算 `< $30`、Ocean 软偏好，再归约为当前需求。
-- 商品核验：商品类别为 mug、价格严格低于 `$30`，且标签包含 Ocean。
-- 结论：通过。
+核验：trace 的 `candidate_comparison.handler` 为 `deterministic_ranking`；排序顺序为已验证偏好、价格、商品 ID，推荐不依赖第二次模型选择。
 
-## M02：预算替换
+![R04：排序依据](screenshots/04-ranking-evidence.png)
 
-第 ① 轮输入：`I need a mug under $30.` ；第 ② 轮输入：`Actually, under $8.`
+## R05：商品详情与比较
 
-- 结果：第 ② 轮返回 `no_match`。
-- 状态核验：当前预算被替换为 `< $8`，而不是同时保留 `< $30` 和 `< $8`；商品类型 mug 继续有效。
-- 结论：通过。
+输入：
 
-## M03：同轮商品类型冲突
+```text
+请介绍 P0005 的描述和标签
+比较 P0005 和 P0006
+```
 
-输入：`I need a mug and a shirt.`
+结果：详情页返回 P0005 的真实字段；比较页并列展示 P0005 与 P0006 的价格、厂商、标签和描述。
 
-- 结果：返回 `conflict`，要求用户在 mug 与 shirt 中选择一类；没有推荐商品。
-- 结论：通过。
+核验：两轮均为只读商品信息操作，不会重新推荐、改变商品 ID 或污染购物状态。
 
-## M04：显式换类
+![R05：详情与比较](screenshots/05-detail-and-comparison.png)
 
-依次输入：`I need a mug under $30.` → `I need a shirt.` → `Actually, change to a shirt under $30.`
+## R06：商品库浏览
 
-- 结果：第 ② 轮不静默换类并要求确认；第 ③ 轮接受明确修改，使用 shirt 与 `< $30` 重新检索并给出推荐。
-- 状态核验：最终归约需求的商品类型为 shirt。
-- 结论：通过。
+操作：切换至“商品库浏览”页面。
 
-## 统一计划与双语状态回归（API Stub，2026-08-08）
+结果：页面展示 1,740 件商品的分页列表，并提供名称、厂商、标签或描述的关键词搜索，以及按 `mug`、`shirt` 等商品类型筛选。
 
-以下为不使用真实 API Key 的结构化 API Stub 回归，用于核验工作流编排；网页仍需按 `test-cases.md` 进行真实 DeepSeek 人工复测。
+核验：商品库页面直接由本地结构化数据驱动，浏览操作不依赖模型调用，也不会改变推荐对话的购物状态。
 
-### R01：通用目录事实
+![R06：商品库浏览](screenshots/06-catalog-browse.png)
 
-输入：`你家都有什么商品？`
-
-- `TurnPlan.intent`：`catalog`；操作：`count + group_by_item_type`。
-- 结果：返回类别统计为 mug 870 件、shirt 870 件。
-- 核验：没有进入需求追问或推荐。
-
-### R02：短句存在性查询
-
-输入：`T恤有吗？`
-
-- `TurnPlan.intent`：`catalog`；操作包含 `count`。
-- 结果：返回本地目录中的 shirt 数量 870。
-- 核验：没有因缺少预算而进入 `recommendation`。
-
-### R03：中英同义类别连续输入
-
-依次输入：`我想买 T恤，预算低于 $30` → `我想买 shirt，预算低于 $30`
-
-- 结果：第二轮继续推荐流程，不显示“改成 shirt”的冲突提示。
-- 状态核验：两轮的 canonical item type 均为 `shirt`；原始表达仅用于面向用户的文字。
-- 结论：通过。
-
-### R04：模型 schema 与决策输出保护
-
-- 当目录查询模型返回 `concepts: null` 时，系统将其规范为空数组并继续执行目录查询，不再抛出 `TypeError`。
-- 当候选决策模型返回目录外商品 ID 时，系统返回 `service_error`，保留失败阶段 trace，并回滚本轮未完成的 `constraint_update`；不会改为推荐本地排序第一名。
-- “有衬衫吗？都有哪些风格？”规划为 `count + group_by_tag`，标签统计必须来自真实 shirt 商品；目录查询不覆盖待补充的推荐状态。
-
-## 已知边界
-
-- 系统只使用 DeepSeek API；若请求超时、配置缺失或 JSON 无效，会显示模型服务错误，不会以本地规则生成推荐。
-- 对 `Disney-style` 这类无法映射到目录标签的软风格偏好，模型只能给出相近方案并明确其不是已验证的 Disney 商品。
-- 目录事实问题由统一 TurnPlan 的受限操作执行；网页人工测试仍应确认真实模型对短句、复合问题和多轮上下文的计划稳定性。
+> 截图文件的固定命名和放置位置见 [`screenshots/README.md`](screenshots/README.md)。

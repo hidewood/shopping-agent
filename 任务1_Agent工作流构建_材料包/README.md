@@ -1,34 +1,46 @@
-# Shopping Agent Workflow
+# 智能购物 Agent
 
-一个基于 DeepSeek API 的本地商品库购物 Agent 原型。每条消息先由模型生成受限的 `TurnPlan`，再由代码执行真实目录查询、状态迁移、硬约束过滤与结果校验；仅在推荐时额外让模型比较真实候选。网页支持有状态多轮对话、主动追问、目录聚合查询和可核验解释。
+基于 DeepSeek API 和本地商品目录实现的购物 Agent。系统使用大模型理解用户意图并生成受限的 `TurnPlan`；代码负责会话状态、目录检索、硬约束校验、候选排序和结果可追溯性。
 
-## 工作流
+## 核心工作流
 
 ```text
-单轮需求 / 对话新消息
-  -> DeepSeek：统一 TurnPlan（一次）
-     -> chat：自然客服回复（不访问商品库、不改变购物条件）
-     -> catalog：代码执行 count / group_by / list / price 等目录操作
-     -> recommendation：状态归约、筛选；DeepSeek 仅比较真实候选（第二次调用）
-     -> product_detail / product_comparison：代码核验指定商品 ID 的真实字段
+用户消息
+  → DeepSeek：TurnPlan 语义规划
+  → 计划契约校验 / 一次协议修复
+  ├─ 聊天                 → 自然回复
+  ├─ 目录信息查询         → 真实目录聚合
+  ├─ 商品详情或比较       → 校验商品 ID 后只读返回
+  ├─ 购物推荐             → 状态归约 → 硬过滤 → 确定性排序
+  └─ 订单/支付等动作      → 能力注册表检查
 ```
 
-详细设计见 [docs/workflow.md](docs/workflow.md)。
+推荐只会在模型规划成功后执行；硬条件由商品库验证，候选稳定按“已验证偏好 → 价格从低到高 → 商品 ID”排序。没有有效模型计划时，系统不会以本地规则启动检索或伪造推荐。
 
 ## 项目结构
 
 ```text
-data/                       # 完整商品库、公开任务与数据说明
-starter/
-  agent_interface.py        # 单文件 Agent：配置、提示词、对话状态、检索、校验和接口
-docs/                       # 工作流设计与图形化测试场景
-tests/                      # 不调用 API 的回归测试
-app.py                      # Streamlit 图形化页面
+app.py                         # Streamlit 页面入口
+starter/agent_interface.py     # Agent、提示词、状态、工具与校验
+data/
+  products.jsonl               # 1,740 件商品
+  tasks.jsonl                  # 50 条公开评测任务
+  metadata.json                # 数据来源与许可证
+tests/
+  test_product_repository.py   # 离线回归测试
+  test_live_api_smoke.py       # 可选真实 API 冒烟测试
+  task_evaluation.py           # 50 条任务评测及报告生成器
+docs/
+  experiment-report.md         # 实验报告
+  workflow.md                  # 完整工作流与协议
+  task-evaluation.md/.json     # 50 条任务结果与机器可读 trace
+  representative-runs.md       # 人工核验记录
+  screenshots/                 # 人工核验截图
 ```
 
-## 安装
+## 安装与配置
 
-需要 Python 3.10 或更高版本。
+需要 Python 3.10+。
 
 ```bash
 python -m venv .venv
@@ -42,60 +54,83 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-编辑 `.env`，填写自己的 DeepSeek API Key：
+编辑 `.env`：
 
 ```env
 DEEPSEEK_API_KEY=your_api_key_here
 DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_TIMEOUT_SECONDS=20
+DEEPSEEK_TIMEOUT_SECONDS=45
 DEEPSEEK_MAX_RETRIES=1
 ```
 
-`.env` 已被 Git 忽略，禁止提交真实密钥。
+`.env` 已被 Git 忽略，禁止提交真实 API Key。
 
 ## 运行
-
-图形化页面：
 
 ```bash
 streamlit run app.py
 ```
 
-浏览器打开命令行显示的本地地址（默认 `http://localhost:8501`）。在“智能推荐”中可直接输入需求；如果信息不足，继续在底部输入框回答追问即可。点击“新建对话”会开启独立会话，不会继承旧条件。页面还提供商品库浏览、推荐结果和按需展开的核验依据。
+浏览器打开命令行显示的本地地址（默认 `http://localhost:8501`）。点击“新建对话”可开启独立会话；推荐结果可展开查看候选商品、约束过滤数量和结构化核验记录。
 
-测试任务与人工核验要点见 [docs/test-cases.md](docs/test-cases.md)。
+## 测试与结果
 
-## 验证
-
-商品检索与硬约束逻辑无需 API 即可测试：
+离线回归：
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-图形化页面是项目唯一的用户交互入口；单元测试仅用于开发验证。
+当前基线：测试套件共 60 项，其中 **59 项离线回归通过**；另有 1 项真实 API 冒烟测试默认跳过。
 
-如需验证真实网络、代理、模型名和 JSON 计划遵从性，可在已配置 Key 的环境显式执行（会产生 API 调用）：
+执行 50 条公开任务评测（会调用真实 DeepSeek API）：
 
-```powershell
-$env:RUN_LIVE_API_TESTS=1
-python -m unittest tests.test_live_api_smoke -v
+```bash
+python tests/task_evaluation.py --output docs/task-evaluation.json --markdown-output docs/task-evaluation.md
 ```
 
-## 设计边界与失败处理
+最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。逐项结果见 [task-evaluation.md](docs/task-evaluation.md)，原始记录见 [task-evaluation.json](docs/task-evaluation.json)。
 
-- 模型解析的类别、厂商和标签提示必须先在商品目录中验证，目录外值不会直接参与过滤；
-- 内部目录值保持英文；代码和提示词只使用一组可审查的中文常用别名（如 `衬衫 → shirt`、`海洋主题 → Ocean`）辅助对齐，未收录的品牌、风格或中文译名不会被擅自替换；
-- 模型只能从代码提供的候选商品中选，最终 ID 由代码复核；
-- 价格、已对齐的类别、硬性厂商和硬性标签由代码严格过滤；
-- 风格、用途和“优先某厂商”等软偏好仅用于排序；软偏好得分相同时，代码强制低价优先；相近替代方案会在结果中说明；
-- 无匹配时不编造商品，明确返回无结果；
-- 模型/API/JSON 发生异常时，记录 `trace` 并明确返回模型服务错误；系统不会以本地规则替代模型决策；
-- API 客户端默认 20 秒超时、最多重试一次；错误会按连接、超时、限流、认证、服务端状态或模型输出不合规分类，且不会显示敏感信息；
-- 正常聊天、目录查询、商品详情与比较调用一次模型；正常购物推荐调用两次（统一计划、候选决策）。每个步骤均有固定上限，不存在无限循环。
-- 对话状态以事件日志保存，并在每轮归约为当前需求；新预算会替换旧预算。类型冲突先比较经受控中英文对照和目录校验后的规范值，因此 `T恤`、`衬衫` 与 `shirt` 不会被误判为换类。
-- 每条消息由 DeepSeek 输出一个经过严格校验的 `TurnPlan`；其 intent 为 `chat`、`catalog`、`recommendation`、`product_detail` 或 `product_comparison`。目录查询可组合多个操作，例如按标签/风格聚合；聊天、目录查询和服务错误均不会改写正在进行的购物追问。客服不得编造订单、配送、售后、库存或隐私政策事实。
+## 人工核验展示
 
-## 数据来源
+| 场景 | 验证点 | 截图 |
+| --- | --- | --- |
+| 目录查询后继续推荐 | 浏览任务不覆盖购物状态 | [R01](docs/representative-runs.md#r01目录浏览不覆盖购物任务) |
+| 衬衫切换为马克杯 | 新任务替换旧条件，无状态泄漏 | [R02](docs/representative-runs.md#r02新类型自动开启新选择任务) |
+| Ocean mug + 优先厂商 | 硬约束与软偏好共同生效 | [R03](docs/representative-runs.md#r03硬主题与优先厂商) |
+| 展开推荐依据 | 软偏好与确定性排序可审阅 | [R04](docs/representative-runs.md#r04软偏好参与确定性候选排序) |
+| 商品详情与比较 | 真实 ID 驱动的只读工具调用 | [R05](docs/representative-runs.md#r05商品详情与比较) |
+| 商品库浏览 | 分页、关键词检索与按商品类型筛选 | [R06](docs/representative-runs.md#r06商品库浏览) |
 
-`data/products.jsonl` 已导入上游完整商品库，共 1,740 件商品。`metadata.json` 记录了数据源为 [stockholmux/ecommerce-sample-set](https://github.com/stockholmux/ecommerce-sample-set)，上游许可证为 Creative Commons Attribution-Share Alike 3.0 Unported。
+完整说明与截图见 [representative-runs.md](docs/representative-runs.md)。截图文件名清单见 [docs/screenshots/README.md](docs/screenshots/README.md)。
+
+<details>
+<summary>展开查看 6 张人工核验截图</summary>
+
+<img src="docs/screenshots/01-task-context-price-query.png" alt="R01 目录浏览不覆盖购物任务" width="720">
+
+<img src="docs/screenshots/02-type-switch.png" alt="R02 新类型替换旧任务" width="720">
+
+<img src="docs/screenshots/03-preferred-manufacturer.png" alt="R03 Ocean 主题与优先厂商" width="720">
+
+<img src="docs/screenshots/04-ranking-evidence.png" alt="R04 确定性排序依据" width="720">
+
+<img src="docs/screenshots/05-detail-and-comparison.png" alt="R05 商品详情与比较" width="720">
+
+<img src="docs/screenshots/06-catalog-browse.png" alt="R06 商品库浏览" width="720">
+
+</details>
+
+## 文档索引
+
+- [实验报告](docs/experiment-report.md)：大模型使用方式、工作流、工具/提示词设计、结果与局限性。
+- [工作流设计](docs/workflow.md)：`TurnPlan` 协议、状态机、目录操作与错误处理。
+- [测试场景](docs/test-cases.md)：自动化及人工测试场景。
+- [任务评测](docs/task-evaluation.md)：50 条公开任务逐项结果。
+- [人工运行记录](docs/representative-runs.md)：截图对应的对话和核验结论。
+
+## 数据来源与边界
+
+`data/products.jsonl` 来自 [stockholmux/ecommerce-sample-set](https://github.com/stockholmux/ecommerce-sample-set)，许可证为 Creative Commons Attribution-Share Alike 3.0 Unported。商品库规范值和描述保留上游英文数据。
+
+系统当前支持商品查询、比较和推荐；订单创建、支付和取消订单已被建模为受控动作，但能力注册表明确标记为未实现，不会伪称操作成功。
