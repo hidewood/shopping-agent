@@ -85,10 +85,16 @@ def readable_requirements(grounded: dict[str, Any]) -> list[str]:
         items.append(f"优先厂商：{grounded['preferred_manufacturer']}")
     if grounded.get("price_value") is not None:
         items.append(f"预算：价格 {grounded.get('price_operator')} ${grounded['price_value']:.2f}")
-    if grounded.get("required_tags"):
-        items.append("硬性主题：" + "、".join(grounded["required_tags"]))
-    if grounded.get("preferred_tags"):
-        items.append("偏好主题：" + "、".join(grounded["preferred_tags"]))
+    required_groups = grounded.get("required_tag_groups") or [
+        [tag] for tag in grounded.get("required_tags", [])
+    ]
+    preferred_groups = grounded.get("preferred_tag_groups") or [
+        [tag] for tag in grounded.get("preferred_tags", [])
+    ]
+    if required_groups:
+        items.append("硬性主题：" + "；".join(" 或 ".join(group) for group in required_groups))
+    if preferred_groups:
+        items.append("偏好主题：" + "；".join(" 或 ".join(group) for group in preferred_groups))
     return items
 
 

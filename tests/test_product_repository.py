@@ -362,6 +362,56 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertIn("Clothes", products[0].tags)
         self.assertLess(products[0].price, 23)
 
+    def test_alternative_tag_hints_match_strawberry_singular_or_plural(self) -> None:
+        requirement = ShoppingRequirement(
+            item_type=CatalogConstraint("衬衫", "hard", "shirt"),
+            manufacturer=CatalogConstraint("Bernier-Hane", "hard", "Bernier-Hane"),
+            concepts=[
+                Concept(
+                    raw_value="草莓",
+                    kind="theme",
+                    constraint_strength="hard",
+                    catalog_tag_hints=["Strawberry", "Strawberries"],
+                )
+            ],
+        )
+        grounded = self.repository.ground(requirement)
+        products, counts = self.repository.retrieve(grounded)
+        self.assertEqual(grounded.required_tag_groups, [["Strawberry", "Strawberries"]])
+        self.assertEqual(counts["after_required_tags"], 1)
+        self.assertEqual([product.product_id for product in products], ["P1676"])
+
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = StubLLM(
+            [{
+                "goal": "selection", "target": "catalog", "customer_reply": None,
+                "requirement": requirement.to_dict(), "catalog_operations": [],
+                "state_action": "replace", "selection_mode": "criteria", "action": None,
+                "goal_evidence": ["草莓"],
+            }]
+        )
+        result = agent.run_turn("我想买一件衬衫，制造商为Bernier-Hane，关于草莓的", ConversationState())
+        self.assertEqual(result["purchased_product_id"], "P1676")
+
+    def test_distinct_hard_concepts_remain_and_groups(self) -> None:
+        requirement = ShoppingRequirement(
+            item_type=CatalogConstraint("shirt", "hard", "shirt"),
+            concepts=[
+                Concept("Ocean", "theme", "hard", ["Ocean"]),
+                Concept("City", "theme", "hard", ["City"]),
+            ],
+        )
+        grounded = self.repository.ground(requirement)
+        products, _ = self.repository.retrieve(grounded)
+        self.assertEqual(grounded.required_tag_groups, [["Ocean"], ["City"]])
+        self.assertTrue(products)
+        self.assertTrue(all("Ocean" in product.tags and "City" in product.tags for product in products))
+
+    def test_alternative_soft_preference_counts_once(self) -> None:
+        product = self.repository.by_id["P1676"]
+        requirement = GroundedRequirement(preferred_tag_groups=[["Strawberry", "Strawberries"]])
+        self.assertEqual(self.repository.preference_score(product, requirement), (0, 1))
+
     def test_bilingual_tag_aliases_map_only_to_real_catalog_tags(self) -> None:
         self.assertIn("Ocean", self.repository.tags_in_text("我想看海洋主题的商品"))
         self.assertIn("Sunset", self.repository.tags_in_text("我喜欢夕阳图案"))

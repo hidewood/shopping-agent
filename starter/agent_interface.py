@@ -419,6 +419,11 @@ class GroundedRequirement:
     price_value: float | None = None
     required_tags: list[str] = field(default_factory=list)
     preferred_tags: list[str] = field(default_factory=list)
+    # Values in one group are alternative catalog mappings for the same user
+    # concept (OR). Different groups remain independent requirements (AND).
+    # The flat fields above are retained for compatible traces and display.
+    required_tag_groups: list[list[str]] = field(default_factory=list)
+    preferred_tag_groups: list[list[str]] = field(default_factory=list)
     semantic_preferences: list[str] = field(default_factory=list)
     unresolved_hard_constraints: list[str] = field(default_factory=list)
     mappings: list[dict[str, Any]] = field(default_factory=list)
@@ -539,6 +544,19 @@ def _deduplicate(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _deduplicate_tag_groups(groups: Iterable[Iterable[str]]) -> list[list[str]]:
+    """Keep OR groups intact while removing repeated values and duplicate groups."""
+    seen: set[tuple[str, ...]] = set()
+    result: list[list[str]] = []
+    for group in groups:
+        values = _deduplicate(str(value) for value in group)
+        key = tuple(sorted(_normalize(value) for value in values))
+        if values and key not in seen:
+            seen.add(key)
+            result.append(values)
+    return result
+
+
 @dataclass(frozen=True)
 class Product:
     product_id: str
@@ -643,6 +661,11 @@ class ProductRepository:
             )
             if concept.constraint_strength == "hard":
                 if matched_tags:
+                    # One natural-language concept may resolve to several
+                    # catalog alternatives (for example Strawberry OR
+                    # Strawberries). Do not flatten them into an accidental
+                    # conjunction during retrieval.
+                    grounded.required_tag_groups.append(matched_tags)
                     grounded.required_tags.extend(matched_tags)
                 else:
                     grounded.unresolved_hard_constraints.append(
@@ -650,10 +673,14 @@ class ProductRepository:
                     )
             else:
                 grounded.semantic_preferences.append(concept.raw_value)
+                if matched_tags:
+                    grounded.preferred_tag_groups.append(matched_tags)
                 grounded.preferred_tags.extend(matched_tags)
 
         grounded.required_tags = _deduplicate(grounded.required_tags)
         grounded.preferred_tags = _deduplicate(grounded.preferred_tags)
+        grounded.required_tag_groups = _deduplicate_tag_groups(grounded.required_tag_groups)
+        grounded.preferred_tag_groups = _deduplicate_tag_groups(grounded.preferred_tag_groups)
         grounded.semantic_preferences = _deduplicate(grounded.semantic_preferences)
         grounded.unresolved_hard_constraints = _deduplicate(grounded.unresolved_hard_constraints)
         return grounded
@@ -687,7 +714,7 @@ class ProductRepository:
         after_tags = [
             product
             for product in after_price
-            if self._has_all_tags(product, requirement.required_tags)
+            if self._has_tag_groups(product, requirement.required_tag_groups, requirement.required_tags)
         ]
         ranked = self.rank_candidates(after_tags, requirement)
         return ranked, {
@@ -779,9 +806,26 @@ class ProductRepository:
         )
 
     @staticmethod
-    def _has_all_tags(product: Product, tags: Iterable[str]) -> bool:
+    def _has_tag_groups(
+        product: Product, groups: Iterable[Iterable[str]], legacy_tags: Iterable[str]
+    ) -> bool:
+        """Apply OR within each concept group and AND between concept groups.
+
+        ``legacy_tags`` preserves compatibility with callers that construct a
+        GroundedRequirement directly instead of passing it through ground().
+        """
         product_tags = {_normalize(tag) for tag in product.tags}
-        return all(_normalize(tag) in product_tags for tag in tags)
+        resolved_groups: list[list[str]] = []
+        for group in groups:
+            values = list(group)
+            if values:
+                resolved_groups.append(values)
+        if not resolved_groups:
+            resolved_groups = [[tag] for tag in legacy_tags]
+        return all(
+            any(_normalize(tag) in product_tags for tag in group)
+            for group in resolved_groups
+        )
 
     @staticmethod
     def _matches_price(product: Product, requirement: GroundedRequirement) -> bool:
@@ -799,7 +843,11 @@ class ProductRepository:
     @staticmethod
     def preference_score(product: Product, requirement: GroundedRequirement) -> tuple[int, int]:
         product_tags = {_normalize(tag) for tag in product.tags}
-        preferred_tag_score = sum(_normalize(tag) in product_tags for tag in requirement.preferred_tags)
+        groups = requirement.preferred_tag_groups or [[tag] for tag in requirement.preferred_tags]
+        preferred_tag_score = sum(
+            any(_normalize(tag) in product_tags for tag in group)
+            for group in groups
+        )
         preferred_manufacturer_score = int(product.manufacturer == requirement.preferred_manufacturer)
         return preferred_manufacturer_score, preferred_tag_score
 
@@ -880,8 +928,9 @@ use case, and suitability are preferences only when the user expresses them as a
 (for example "想买纽约风的衣服" or "a Beach themed mug"), it is hard even without words such as
 "必须". A catalog query treats its stated
 filters as hard in execution. catalog_hint and catalog_tag_hints must be exact supplied catalog values or
-null/an empty list; never invent catalog facts. Preserve Chinese raw wording and use supplied bilingual
-aliases only when their English canonical value exists in the catalog.
+null/an empty list; never invent catalog facts. Multiple catalog_tag_hints inside one concept are alternative
+catalog mappings for that one concept, not several separate user requirements. Preserve Chinese raw wording
+and use supplied bilingual aliases only when their English canonical value exists in the catalog.
 
 Do not invent inventory, orders, delivery, returns, policies, product IDs, or facts outside the supplied catalog.
 """
@@ -1358,6 +1407,15 @@ class ShoppingAgent:
                 for value in status["canonical_values"]
             }
             grounded.required_tags = [tag for tag in grounded.required_tags if tag not in ambiguous_tags]
+            ambiguous_group_keys = {
+                tuple(sorted(_normalize(value) for value in status["canonical_values"]))
+                for status in ambiguous_statuses
+            }
+            grounded.required_tag_groups = [
+                group
+                for group in grounded.required_tag_groups
+                if tuple(sorted(_normalize(value) for value in group)) not in ambiguous_group_keys
+            ]
         effective_operations = list(plan.catalog_operations)
         if (unresolved_concepts or ambiguous_concepts) and "group_by_tag" not in effective_operations:
             effective_operations.append("group_by_tag")
@@ -1592,8 +1650,11 @@ class ShoppingAgent:
             parts.append(requirement.item_type)
         if requirement.hard_manufacturer:
             parts.append(requirement.hard_manufacturer)
-        if requirement.required_tags:
-            parts.append("标签为 " + "、".join(requirement.required_tags))
+        tag_groups = requirement.required_tag_groups or [[tag] for tag in requirement.required_tags]
+        if tag_groups:
+            parts.append(
+                "标签为 " + "且".join("（" + "或".join(group) + "）" for group in tag_groups)
+            )
         return "符合“" + "、".join(parts) + "”条件的" if parts else ""
 
     @staticmethod
@@ -2043,8 +2104,11 @@ class ShoppingAgent:
             constraints.append(
                 f"价格 {requirement.price_operator} ${requirement.price_value:.2f}"
             )
-        if requirement.required_tags:
-            constraints.append("标签包含 " + ", ".join(requirement.required_tags))
+        tag_groups = requirement.required_tag_groups or [[tag] for tag in requirement.required_tags]
+        if tag_groups:
+            constraints.append(
+                "标签包含 " + " 且 ".join("（" + " 或 ".join(group) + "）" for group in tag_groups)
+            )
         detail = "、".join(constraints) or "当前条件"
         return f"商品库中没有同时满足{detail}的商品。可以尝试放宽预算、品牌或主题条件。"
 
