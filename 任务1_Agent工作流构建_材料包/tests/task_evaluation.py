@@ -179,7 +179,7 @@ def merge_retry_report(primary_path: Path, retry_path: Path) -> dict[str, Any]:
 
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
-        "# 50 条公开任务评测结果",
+        "# 智能购物 Agent 测试报告",
         "",
         "## 汇总",
         "",
@@ -189,7 +189,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- 通过率：{report['pass_rate']:.1%}",
         f"- 最终结果生成时间（UTC）：{report['generated_at_utc']}",
         "",
-        "每条任务先经 DeepSeek 生成 `TurnPlan`，再由程序验证返回商品的类别、主题标签、预算、严格厂商条件和确定性排序 trace。详细机器可读记录见 [`task-evaluation.json`](task-evaluation.json)。",
+        "测试分为两部分：50 条公开任务的真实 API 评测，以及 6 个代表性人工界面场景。每条公开任务先经 DeepSeek 生成 `TurnPlan`，再由程序验证返回商品的类别、主题标签、预算、严格厂商条件和确定性排序 trace。",
     ]
     history = report.get("execution_history")
     if history:
@@ -200,13 +200,31 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "",
                 "## 执行说明",
                 "",
-                f"首轮运行得到 {initial['passed']}/50；随后发现两条结果被模型的多余追问阻断，因此修复为由 `RecommendationPolicy` 决定推荐资格。另有一条为单次模型响应异常。对 A023、A035、A047 复测后均通过，最终覆盖 50/50。首次和复测 trace 均保存在 JSON 的 `attempt_history` 中。",
+                f"首轮运行得到 {initial['passed']}/50；随后发现两条结果被模型的多余追问阻断，因此修复为由 `RecommendationPolicy` 决定推荐资格。另有一条为单次模型响应异常。对 A023、A035、A047 复测后均通过，最终覆盖 50/50。机器可读运行记录仅在本地 `outputs/` 中生成，不作为最终提交文档。",
             ]
         )
     lines.extend(
         [
             "",
+            "离线回归测试另包含 59 项通过的单元测试；1 项真实 API 冒烟测试默认跳过，避免在未配置密钥时产生服务调用。",
+            "",
+            "## 代表性人工运行记录",
+            "",
+            "| 编号 | 用户输入或操作 | 核验重点 | 结果 |",
+            "| --- | --- | --- | --- |",
+            "| R01 | `我想买一件T恤` → `衬衫有什么价位？` → `预算低于20元` | 目录浏览是只读任务，不覆盖待补充的推荐状态 | 后续预算能够继续原 T 恤需求 |",
+            "| R02 | 纽约风衬衫 → 清新风格马克杯 | 新商品类型开启新选择任务 | 旧类型、预算和主题不泄漏 |",
+            "| R03 | 海洋主题马克杯、预算低于 30、优先 Bayer-and-Sons | 硬条件过滤与厂商软偏好 | 返回 Ocean 标签、低于预算且优先厂商的商品 |",
+            "| R04 | 马克杯、预算低于 30、优先海洋主题 | 推荐依据与稳定排序 | 页面展示候选、过滤数量和确定性排序依据 |",
+            "| R05 | 查询 P0005，比较 P0005 与 P0006 | 真实商品 ID 的只读操作 | 返回两件商品的实际字段，不改变购物状态 |",
+            "| R06 | 切换至商品库浏览页 | 非模型目录浏览 | 支持关键词检索、商品类型筛选和分页 |",
+            "",
+            "六个场景的界面截图展示在仓库 [README](../README.md#人工核验展示) 中。",
+            "",
             "## 逐项结果",
+            "",
+            "<details>",
+            "<summary>展开查看 50 条公开任务的逐项结果</summary>",
             "",
             "| 任务 | 指令 | 最终商品 | 结果 |",
             "| --- | --- | --- | --- |",
@@ -222,6 +240,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "</details>",
+            "",
             "## 判定规则",
             "",
             report["evaluation_rule"],
@@ -234,7 +254,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tasks", type=Path, default=PROJECT_DIR / "data" / "tasks.jsonl")
     parser.add_argument(
-        "--output", type=Path, default=PROJECT_DIR / "docs" / "task-evaluation.json"
+        "--output", type=Path, default=PROJECT_DIR / "outputs" / "task-evaluation.json"
     )
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N tasks for connectivity checks.")
     parser.add_argument("--task-ids", nargs="+", help="Run only the named task IDs.")

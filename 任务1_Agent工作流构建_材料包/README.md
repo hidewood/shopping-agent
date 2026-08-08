@@ -31,10 +31,8 @@ tests/
   test_live_api_smoke.py       # 可选真实 API 冒烟测试
   task_evaluation.py           # 50 条任务评测及报告生成器
 docs/
-  experiment-report.md         # 实验报告
-  workflow.md                  # 完整工作流与协议
-  task-evaluation.md/.json     # 50 条任务结果与机器可读 trace
-  representative-runs.md       # 人工核验记录
+  experiment-report.md         # 实验报告：模型、工作流、提示词与工具设计
+  task-evaluation.md           # 测试报告：50 条评测与人工核验记录
   screenshots/                 # 人工核验截图
 ```
 
@@ -86,23 +84,23 @@ python -m unittest discover -s tests -v
 执行 50 条公开任务评测（会调用真实 DeepSeek API）：
 
 ```bash
-python tests/task_evaluation.py --output docs/task-evaluation.json --markdown-output docs/task-evaluation.md
+python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output docs/task-evaluation.md
 ```
 
-最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。逐项结果见 [task-evaluation.md](docs/task-evaluation.md)，原始记录见 [task-evaluation.json](docs/task-evaluation.json)。
+最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。逐项结果与人工核验记录见 [测试报告](docs/task-evaluation.md)。
 
 ## 人工核验展示
 
 | 场景 | 验证点 | 截图 |
 | --- | --- | --- |
-| 目录查询后继续推荐 | 浏览任务不覆盖购物状态 | [R01](docs/representative-runs.md#r01目录浏览不覆盖购物任务) |
-| 衬衫切换为马克杯 | 新任务替换旧条件，无状态泄漏 | [R02](docs/representative-runs.md#r02新类型自动开启新选择任务) |
-| Ocean mug + 优先厂商 | 硬约束与软偏好共同生效 | [R03](docs/representative-runs.md#r03硬主题与优先厂商) |
-| 展开推荐依据 | 软偏好与确定性排序可审阅 | [R04](docs/representative-runs.md#r04软偏好参与确定性候选排序) |
-| 商品详情与比较 | 真实 ID 驱动的只读工具调用 | [R05](docs/representative-runs.md#r05商品详情与比较) |
-| 商品库浏览 | 分页、关键词检索与按商品类型筛选 | [R06](docs/representative-runs.md#r06商品库浏览) |
+| 目录查询后继续推荐 | 浏览任务不覆盖购物状态 | R01 |
+| 衬衫切换为马克杯 | 新任务替换旧条件，无状态泄漏 | R02 |
+| Ocean mug + 优先厂商 | 硬约束与软偏好共同生效 | R03 |
+| 展开推荐依据 | 软偏好与确定性排序可审阅 | R04 |
+| 商品详情与比较 | 真实 ID 驱动的只读工具调用 | R05 |
+| 商品库浏览 | 分页、关键词检索与按商品类型筛选 | R06 |
 
-完整说明与截图见 [representative-runs.md](docs/representative-runs.md)。截图文件名清单见 [docs/screenshots/README.md](docs/screenshots/README.md)。
+六个场景的输入、关键处理过程和结果说明见 [测试报告](docs/task-evaluation.md#代表性人工运行记录)。
 
 <details>
 <summary>展开查看 6 张人工核验截图</summary>
@@ -121,13 +119,10 @@ python tests/task_evaluation.py --output docs/task-evaluation.json --markdown-ou
 
 </details>
 
-## 文档索引
+## 提交文档
 
 - [实验报告](docs/experiment-report.md)：大模型使用方式、工作流、工具/提示词设计、结果与局限性。
-- [工作流设计](docs/workflow.md)：`TurnPlan` 协议、状态机、目录操作与错误处理。
-- [测试场景](docs/test-cases.md)：自动化及人工测试场景。
-- [任务评测](docs/task-evaluation.md)：50 条公开任务逐项结果。
-- [人工运行记录](docs/representative-runs.md)：截图对应的对话和核验结论。
+- [测试报告](docs/task-evaluation.md)：50 条公开任务逐项结果与 6 个代表性人工运行记录。
 
 ## 数据来源与边界
 
