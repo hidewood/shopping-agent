@@ -20,20 +20,21 @@
 ## 项目结构
 
 ```text
-app.py                         # Streamlit 页面入口
-starter/agent_interface.py     # Agent、提示词、状态、工具与校验
-data/
-  products.jsonl               # 1,740 件商品
-  tasks.jsonl                  # 50 条公开评测任务
-  metadata.json                # 数据来源与许可证
-tests/
-  test_product_repository.py   # 离线回归测试
-  test_live_api_smoke.py       # 可选真实 API 冒烟测试
-  task_evaluation.py           # 50 条任务评测及报告生成器
-docs/
-  experiment-report.md         # 实验报告：模型、工作流、提示词与工具设计
-  task-evaluation.md           # 测试报告：50 条评测与人工核验记录
-  screenshots/                 # 人工核验截图
+任务1_Agent工作流构建_材料包/
+  app.py                         # Streamlit 页面入口
+  starter/agent_interface.py     # Agent、提示词、状态、工具与校验
+  data/
+    products.jsonl               # 1,740 件商品
+    tasks.jsonl                  # 50 条公开评测任务
+    metadata.json                # 数据来源与许可证
+  tests/
+    test_product_repository.py   # 离线回归测试
+    test_live_api_smoke.py       # 可选真实 API 冒烟测试
+    task_evaluation.py           # 50 条任务评测及报告生成器
+  docs/
+    experiment-report.md         # 实验报告：模型、工作流、提示词与工具设计
+    task-evaluation.md           # 测试报告：50 条评测与人工核验记录
+    screenshots/                 # 人工核验截图
 ```
 
 ## 安装与配置
@@ -41,6 +42,7 @@ docs/
 需要 Python 3.10+。
 
 ```bash
+cd 任务1_Agent工作流构建_材料包
 python -m venv .venv
 ```
 
@@ -87,7 +89,7 @@ python -m unittest discover -s tests -v
 python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output docs/task-evaluation.md
 ```
 
-最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。逐项结果与人工核验记录见 [测试报告](docs/task-evaluation.md)。
+最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。逐项结果与人工核验记录见 [测试报告](任务1_Agent工作流构建_材料包/docs/task-evaluation.md)。
 
 ## 人工核验展示
 
@@ -100,32 +102,32 @@ python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown
 | 商品详情与比较 | 真实 ID 驱动的只读工具调用 | R05 |
 | 商品库浏览 | 分页、关键词检索与按商品类型筛选 | R06 |
 
-六个场景的输入、关键处理过程和结果说明见 [测试报告](docs/task-evaluation.md#代表性人工运行记录)。
+六个场景的输入、关键处理过程和结果说明见 [测试报告](任务1_Agent工作流构建_材料包/docs/task-evaluation.md#代表性人工运行记录)。
 
 <details>
 <summary>展开查看 6 张人工核验截图</summary>
 
-<img src="docs/screenshots/01-task-context-price-query.png" alt="R01 目录浏览不覆盖购物任务" width="720">
+<img src="任务1_Agent工作流构建_材料包/docs/screenshots/01-task-context-price-query.png" alt="R01 目录浏览不覆盖购物任务" width="720">
 
-<img src="docs/screenshots/02-type-switch.png" alt="R02 新类型替换旧任务" width="720">
+<img src="任务1_Agent工作流构建_材料包/docs/screenshots/02-type-switch.png" alt="R02 新类型替换旧任务" width="720">
 
-<img src="docs/screenshots/03-preferred-manufacturer.png" alt="R03 Ocean 主题与优先厂商" width="720">
+<img src="任务1_Agent工作流构建_材料包/docs/screenshots/03-preferred-manufacturer.png" alt="R03 Ocean 主题与优先厂商" width="720">
 
-<img src="docs/screenshots/04-ranking-evidence.png" alt="R04 确定性排序依据" width="720">
+<img src="任务1_Agent工作流构建_材料包/docs/screenshots/04-ranking-evidence.png" alt="R04 确定性排序依据" width="720">
 
-<img src="docs/screenshots/05-detail-and-comparison.png" alt="R05 商品详情与比较" width="720">
+<img src="任务1_Agent工作流构建_材料包/docs/screenshots/05-detail-and-comparison.png" alt="R05 商品详情与比较" width="720">
 
-<img src="docs/screenshots/06-catalog-browse.png" alt="R06 商品库浏览" width="720">
+<img src="任务1_Agent工作流构建_材料包/docs/screenshots/06-catalog-browse.png" alt="R06 商品库浏览" width="720">
 
 </details>
 
 ## 提交文档
 
-- [实验报告](docs/experiment-report.md)：大模型使用方式、工作流、工具/提示词设计、结果与局限性。
-- [测试报告](docs/task-evaluation.md)：50 条公开任务逐项结果与 6 个代表性人工运行记录。
+- [实验报告](任务1_Agent工作流构建_材料包/docs/experiment-report.md)：大模型使用方式、工作流、工具/提示词设计、结果与局限性。
+- [测试报告](任务1_Agent工作流构建_材料包/docs/task-evaluation.md)：50 条公开任务逐项结果与 6 个代表性人工运行记录。
 
 ## 数据来源与边界
 
-`data/products.jsonl` 来自 [stockholmux/ecommerce-sample-set](https://github.com/stockholmux/ecommerce-sample-set)，许可证为 Creative Commons Attribution-Share Alike 3.0 Unported。商品库规范值和描述保留上游英文数据。
+`任务1_Agent工作流构建_材料包/data/products.jsonl` 来自 [stockholmux/ecommerce-sample-set](https://github.com/stockholmux/ecommerce-sample-set)，许可证为 Creative Commons Attribution-Share Alike 3.0 Unported。商品库规范值和描述保留上游英文数据。
 
 系统当前支持商品查询、比较和推荐；订单创建、支付和取消订单已被建模为受控动作，但能力注册表明确标记为未实现，不会伪称操作成功。
