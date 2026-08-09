@@ -5,7 +5,7 @@ from typing import Any
 
 import streamlit as st
 
-from starter.agent_interface import Agent, ConversationState
+from starter.agent_interface import FEW_RESULTS_THRESHOLD, Agent, ConversationState
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -56,6 +56,22 @@ def render_tags(tags: list[str]) -> str:
     return "".join(f'<span class="tag">{tag}</span>' for tag in tags) or '<span class="muted">无标签</span>'
 
 
+def show_closest_alternatives(agent: Agent, result: dict[str, Any]) -> None:
+    """Show the near misses behind a no-match answer, one card per relaxation."""
+    alternatives = result.get("catalog_data", {}).get("alternatives", [])
+    if not alternatives:
+        return
+    labels = {"price": "放宽预算后", "manufacturer": "不限厂商后", "tags": "不限主题后"}
+    columns = st.columns(min(3, len(alternatives)))
+    for column, alternative in zip(columns, alternatives):
+        with column:
+            product = alternative["products"][0]
+            product_card(
+                agent.repository.by_id[product["product_id"]],
+                title=labels.get(alternative["relaxed_constraint"], "最接近"),
+            )
+
+
 def product_card(product: Any, *, title: str, primary: bool = False) -> None:
     card_class = "result-card" if primary else "alternative-card"
     st.markdown(
@@ -66,7 +82,6 @@ def product_card(product: Any, *, title: str, primary: bool = False) -> None:
           <div class="price">${product.price:.2f}</div>
           <div>{render_tags(product.tags)}</div>
           <p class="muted" style="margin:.55rem 0 0">厂商：{product.manufacturer}</p>
-          <p class="muted" style="margin:.35rem 0 0">商品描述：{product.description}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -83,7 +98,20 @@ def readable_requirements(grounded: dict[str, Any]) -> list[str]:
         items.append(f"必须厂商：{grounded['hard_manufacturer']}")
     elif grounded.get("preferred_manufacturer"):
         items.append(f"优先厂商：{grounded['preferred_manufacturer']}")
-    if grounded.get("price_value") is not None:
+    if grounded.get("min_price") is not None and grounded.get("max_price") is not None:
+        lower = "≤" if grounded.get("min_price_inclusive", True) else "<"
+        upper = "≤" if grounded.get("max_price_inclusive", True) else "<"
+        items.append(
+            "预算："
+            f"${grounded['min_price']:.2f} {lower} 价格 {upper} ${grounded['max_price']:.2f}"
+        )
+    elif grounded.get("min_price") is not None:
+        operator = "≥" if grounded.get("min_price_inclusive", True) else ">"
+        items.append(f"预算：价格 {operator} ${grounded['min_price']:.2f}")
+    elif grounded.get("max_price") is not None:
+        operator = "≤" if grounded.get("max_price_inclusive", True) else "<"
+        items.append(f"预算：价格 {operator} ${grounded['max_price']:.2f}")
+    elif grounded.get("price_value") is not None:
         items.append(f"预算：价格 {grounded.get('price_operator')} ${grounded['price_value']:.2f}")
     required_groups = grounded.get("required_tag_groups") or [
         [tag] for tag in grounded.get("required_tags", [])
@@ -112,7 +140,9 @@ def friendly_summary(agent: Agent, result: dict[str, Any]) -> str:
     return text
 
 
-def show_decision_evidence(agent: Agent, result: dict[str, Any]) -> None:
+def show_decision_evidence(
+    agent: Agent, result: dict[str, Any], *, include_trace_expander: bool = True
+) -> None:
     trace = result["trace"]
     grounding = trace_item(trace, "catalog_grounding").get("grounded_requirements", {})
     retrieval = trace_item(trace, "retrieval_and_hard_filtering")
@@ -141,12 +171,15 @@ def show_decision_evidence(agent: Agent, result: dict[str, Any]) -> None:
     if candidate_ids:
         st.caption(f"系统从符合硬条件的商品中预选 {len(candidate_ids)} 件进入候选比较。")
 
-    with st.expander("查看结构化核验记录"):
-        safe_trace = []
-        for item in trace:
-            copied = dict(item)
-            copied.pop("eligible_product_ids", None)
-            safe_trace.append(copied)
+    safe_trace = []
+    for item in trace:
+        copied = dict(item)
+        copied.pop("eligible_product_ids", None)
+        safe_trace.append(copied)
+    if include_trace_expander:
+        with st.expander("查看结构化核验记录"):
+            st.json(safe_trace, expanded=False)
+    else:
         st.json(safe_trace, expanded=False)
 
 
@@ -158,19 +191,46 @@ def show_recommendation(agent: Agent, result: dict[str, Any]) -> None:
         return
 
     selected = agent.repository.by_id[product_id]
+    trace = result["trace"]
+    grounding = trace_item(trace, "catalog_grounding").get("grounded_requirements", {})
+    requirements = readable_requirements(grounding)
+
+    # Keep the conversation first: the user sees a grounded recommendation and
+    # its applied conditions before inspecting the visual product evidence.
+    st.markdown(f'<div class="summary-box">{result["summary"]}</div>', unsafe_allow_html=True)
+    if requirements:
+        st.caption("我已按以下条件筛选：" + "；".join(requirements))
+
     product_card(selected, title="推荐商品", primary=True)
-    with st.expander("查看推荐理由、备选与核验依据"):
-        st.markdown(f'<div class="summary-box">{friendly_summary(agent, result)}</div>', unsafe_allow_html=True)
-        comparison = trace_item(result["trace"], "candidate_comparison")
-        candidate_ids = comparison.get("candidate_product_ids", [])
-        alternatives = [agent.repository.by_id[item_id] for item_id in candidate_ids if item_id != product_id and item_id in agent.repository.by_id][:2]
+    with st.expander("查看备选商品与核验依据"):
+        comparison = trace_item(trace, "candidate_comparison")
+        eligible_count = comparison.get("eligible_product_count", 0)
+        candidate_ids = [
+            item_id
+            for item_id in comparison.get("candidate_product_ids", [])
+            if item_id != product_id and item_id in agent.repository.by_id
+        ]
+        # A small eligible set is worth showing in full; a large one only needs a
+        # sample, since the guidance text already reports the full range.
+        if eligible_count and eligible_count <= FEW_RESULTS_THRESHOLD:
+            visible = candidate_ids
+            heading = f"其余 {len(visible)} 件符合条件的商品"
+        else:
+            visible = candidate_ids[:2]
+            heading = "可比较的备选商品"
+        alternatives = [agent.repository.by_id[item_id] for item_id in visible]
         if alternatives:
-            st.markdown('<div class="section-title" style="margin-top:1.2rem">可比较的备选商品</div>', unsafe_allow_html=True)
-            columns = st.columns(len(alternatives))
-            for index, (column, product) in enumerate(zip(columns, alternatives), start=1):
-                with column:
-                    product_card(product, title=f"备选 {index}")
-        show_decision_evidence(agent, result)
+            st.markdown(
+                f'<div class="section-title" style="margin-top:1.2rem">{heading}</div>',
+                unsafe_allow_html=True,
+            )
+            for row_start in range(0, len(alternatives), 3):
+                row = alternatives[row_start : row_start + 3]
+                columns = st.columns(len(row))
+                for offset, (column, product) in enumerate(zip(columns, row)):
+                    with column:
+                        product_card(product, title=f"备选 {row_start + offset + 1}")
+        show_decision_evidence(agent, result, include_trace_expander=False)
 
 
 def show_catalog_answer(agent: Agent, result: dict[str, Any]) -> None:
@@ -201,6 +261,16 @@ def show_catalog_answer(agent: Agent, result: dict[str, Any]) -> None:
             if product_data:
                 with column:
                     product_card(agent.repository.by_id[product_data["product_id"]], title=label)
+        return
+
+    if kind == "exploration":
+        products = data.get("products", [])
+        if products:
+            st.caption(f"先展示 {len(products)} 件目录样例；它们不是最终推荐。")
+            columns = st.columns(len(products))
+            for index, (column, product_data) in enumerate(zip(columns, products), start=1):
+                with column:
+                    product_card(agent.repository.by_id[product_data["product_id"]], title=f"目录样例 {index}")
         return
 
     products = data.get("products", [])
@@ -240,38 +310,44 @@ def show_catalog_answer(agent: Agent, result: dict[str, Any]) -> None:
                 product_card(agent.repository.by_id[product_data["product_id"]], title=title)
 
 
+def render_assistant_result(agent: Agent, result: dict[str, Any]) -> None:
+    """Render one completed assistant turn in either the history or live slot."""
+    response_type = result.get("response_type")
+    if response_type == "conflict":
+        st.warning(result.get("summary", "请确认需求。"))
+    elif response_type == "capability_unavailable":
+        st.warning(result.get("summary", "当前系统暂不支持该操作。"))
+    elif response_type == "service_error":
+        st.error(result.get("summary", "模型服务暂不可用，请稍后重试。"))
+        failed = next(
+            (step for step in result.get("trace", []) if step.get("status") == "failed"),
+            {},
+        )
+        if failed:
+            st.caption(
+                "失败阶段："
+                + str(failed.get("step", "unknown"))
+                + "；错误类别："
+                + str(failed.get("error_code", "model_response_error"))
+            )
+    elif response_type in {"catalog_query", "product_detail", "product_comparison", "exploration"}:
+        show_catalog_answer(agent, result)
+    elif result.get("purchased_product_id") is None:
+        st.info(result.get("summary", "请补充需求。"))
+        if response_type == "no_match":
+            show_closest_alternatives(agent, result)
+    else:
+        show_recommendation(agent, result)
+
+
 def render_conversation(agent: Agent, state: ConversationState) -> None:
     for event in state.events:
         if event.event_type == "user_message":
             with st.chat_message("user"):
                 st.write(event.payload.get("message", ""))
         elif event.event_type == "assistant_message":
-            result = event.payload.get("result", {})
             with st.chat_message("assistant"):
-                response_type = result.get("response_type")
-                if response_type == "conflict":
-                    st.warning(result.get("summary", "请确认需求。"))
-                elif response_type == "capability_unavailable":
-                    st.warning(result.get("summary", "当前系统暂不支持该操作。"))
-                elif response_type == "service_error":
-                    st.error(result.get("summary", "模型服务暂不可用，请稍后重试。"))
-                    failed = next(
-                        (step for step in result.get("trace", []) if step.get("status") == "failed"),
-                        {},
-                    )
-                    if failed:
-                        st.caption(
-                            "失败阶段："
-                            + str(failed.get("step", "unknown"))
-                            + "；错误类别："
-                            + str(failed.get("error_code", "model_response_error"))
-                        )
-                elif response_type in {"catalog_query", "product_detail", "product_comparison"}:
-                    show_catalog_answer(agent, result)
-                elif result.get("purchased_product_id") is None:
-                    st.info(result.get("summary", "请补充需求。"))
-                else:
-                    show_recommendation(agent, result)
+                render_assistant_result(agent, event.payload.get("result", {}))
 
 
 def recommendation_page(agent: Agent) -> None:
@@ -288,11 +364,17 @@ def recommendation_page(agent: Agent) -> None:
             st.rerun()
 
     render_conversation(agent, state)
-    submitted_message = st.chat_input("输入购物需求，或回答上一个问题…")
+    submitted_message = st.chat_input("输入购物需求（如：马克杯、预算 15 以内、Ocean 主题）")
     if submitted_message:
-        with st.spinner("正在处理消息…"):
-            agent.run_turn(submitted_message, state)
-        st.rerun()
+        # Render the current turn immediately.  The persistent event log is
+        # already updated by run_turn, so a later interaction can redraw the
+        # same completed turn from history without needing an extra rerun here.
+        with st.chat_message("user"):
+            st.write(submitted_message)
+        with st.chat_message("assistant"):
+            with st.spinner("正在分析需求…"):
+                result = agent.run_turn(submitted_message, state)
+            render_assistant_result(agent, result)
 
 
 def catalog_page(agent: Agent) -> None:

@@ -304,8 +304,8 @@ class TestLLM:
                 }
             )
         raw_type = item_type or unknown_type
-        has_constraint = any([raw_type, manufacturer, price.value, concepts])
-        needs_detail = bool(raw_type and not manufacturer and price.value is None and not concepts)
+        has_constraint = any([raw_type, manufacturer, price.has_value(), concepts])
+        needs_detail = bool(raw_type and not manufacturer and not price.has_value() and not concepts)
         return {
             "item_type": {
                 "raw_value": raw_type,
@@ -317,7 +317,7 @@ class TestLLM:
                 "constraint_strength": "preference" if manufacturer and manufacturer.casefold() in preference_text.casefold() else "hard",
                 "catalog_hint": manufacturer,
             },
-            "price_constraint": {"operator": price.operator, "value": price.value} if price.value is not None else None,
+            "price_constraint": price.to_dict() if price.has_value() else None,
             "concepts": concepts,
             "needs_clarification": not has_constraint or needs_detail,
             "clarification_question": (
@@ -900,15 +900,30 @@ class ProductRepositoryTests(unittest.TestCase):
             any(step["step"] == "retrieval_and_hard_filtering" for step in result["trace"])
         )
 
-    def test_chinese_type_only_request_asks_for_useful_detail(self) -> None:
+    def test_chinese_type_only_request_starts_grounded_exploration(self) -> None:
+        """A known type reveals the catalog before asking for an optional refinement."""
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = TestLLM(agent.repository)
         result = agent.run_turn("我想买一件T恤", ConversationState())
-        self.assertEqual(result["response_type"], "clarification")
-        self.assertIn("预算", result["summary"])
+        self.assertEqual(result["response_type"], "exploration")
+        self.assertIsNone(result["purchased_product_id"])
+        self.assertEqual(result["conversation_state"]["task_context"]["selection_phase"], "exploring")
+        self.assertEqual(len(result["catalog_data"]["products"]), 3)
+        self.assertEqual(result["proactive_guidance"]["kind"], "exploration_prompt")
 
-    def test_selection_readiness_overrides_an_overeager_model_plan(self) -> None:
-        """A type alone is not enough under the configured recommendation policy."""
+    def test_missing_item_type_is_the_only_clarification(self) -> None:
+        """Without a type there is nothing to retrieve, so this one question remains."""
+        agent = ShoppingAgent(DATA_DIR)
+        agent.llm = TestLLM(agent.repository)
+        result = agent.run_turn("I want a gift.", ConversationState())
+        self.assertEqual(result["response_type"], "clarification")
+        self.assertEqual(result["conversation_state"]["pending_fields"], ["item_type"])
+        self.assertFalse(
+            any(step["step"] == "retrieval_and_hard_filtering" for step in result["trace"])
+        )
+
+    def test_type_only_plan_retrieves_then_enters_exploration(self) -> None:
+        """A type alone is retrievable, but does not imply a final purchase preference."""
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = StubLLM(
             [
@@ -933,9 +948,8 @@ class ProductRepositoryTests(unittest.TestCase):
             ]
         )
         result = agent.run_turn("我想买一件衬衫", ConversationState())
-        self.assertEqual(result["response_type"], "clarification")
-        self.assertIn("预算", result["summary"])
-        self.assertFalse(any(step["step"] == "candidate_preparation" for step in result["trace"]))
+        self.assertEqual(result["response_type"], "exploration")
+        self.assertEqual(result["catalog_data"]["total_count"], 870)
 
     def test_sufficient_requirements_override_an_overcautious_model_clarification(self) -> None:
         """The policy, not a model flag, decides whether selection may execute."""
@@ -960,7 +974,7 @@ class ProductRepositoryTests(unittest.TestCase):
                     "state_action": "replace",
                     "selection_mode": "criteria",
                     "action": None,
-                    "goal_evidence": ["海洋主题的马克杯"],
+                    "goal_evidence": ["Ocean"],
                 }
             ]
         )
@@ -1156,7 +1170,8 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertEqual([step["step"] for step in result["trace"]].count("turn_planning"), 1)
         self.assertEqual(len(agent.llm.calls), 1)  # one plan; candidate ranking is deterministic
 
-    def test_model_planned_clarification_is_shown_without_catalog_retrieval(self) -> None:
+    def test_policy_overrides_a_model_clarification_flag_when_type_is_known(self) -> None:
+        """`needs_clarification` cannot veto a request the policy can retrieve."""
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = StubLLM(
             [
@@ -1185,9 +1200,8 @@ class ProductRepositoryTests(unittest.TestCase):
             ]
         )
         result = agent.run_turn("我想买一件T恤", ConversationState())
-        self.assertEqual(result["response_type"], "clarification")
-        self.assertIn("预算", result["summary"])
-        self.assertFalse(
+        self.assertEqual(result["response_type"], "exploration")
+        self.assertTrue(
             any(step["step"] == "retrieval_and_hard_filtering" for step in result["trace"])
         )
 
@@ -1530,18 +1544,22 @@ class ProductRepositoryTests(unittest.TestCase):
         self.assertEqual(selected["item_type"], "shirt")
         self.assertIn("最便宜", result["summary"])
 
-    def test_catalog_query_preserves_an_unfinished_recommendation(self) -> None:
+    def test_catalog_query_preserves_an_active_selection(self) -> None:
+        """A read-only query must not discard constraints from the selection task."""
         agent = ShoppingAgent(DATA_DIR)
         agent.llm = TestLLM(agent.repository)
         state = ConversationState()
         first = agent.run_turn("我想买一件T恤", state)
         query = agent.run_turn("你家都有什么价位的衬衫", state)
         follow_up = agent.run_turn("预算低于 20", state)
-        self.assertEqual(first["response_type"], "clarification")
+        self.assertEqual(first["response_type"], "exploration")
         self.assertEqual(query["response_type"], "catalog_query")
-        self.assertEqual(query["conversation_state"]["pending_fields"], ["shopping_detail"])
         self.assertEqual(follow_up["response_type"], "recommendation")
-        self.assertEqual(agent._reduce_requirement(state).item_type.raw_value, "shirt")
+        # The shirt constraint survives the browsing turn and the budget refines it.
+        active = agent._reduce_requirement(state)
+        self.assertEqual(active.item_type.raw_value, "shirt")
+        self.assertEqual(active.price_constraint, PriceConstraint("<", 20))
+        self.assertLess(agent.repository.by_id[follow_up["purchased_product_id"]].price, 20)
 
     def test_task_context_preserves_selection_while_browsing_catalog(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -1550,10 +1568,10 @@ class ProductRepositoryTests(unittest.TestCase):
         first = agent.run_turn("我想买一件T恤", state)
         catalog = agent.run_turn("衬衫都有哪些价位？", state)
         context = state.to_dict()["task_context"]
-        self.assertEqual(first["response_type"], "clarification")
+        self.assertEqual(first["response_type"], "exploration")
         self.assertEqual(catalog["response_type"], "catalog_query")
         self.assertEqual(context["active_task"], "selection")
-        self.assertEqual(context["selection_phase"], "collecting")
+        self.assertEqual(context["selection_phase"], "exploring")
         self.assertEqual(context["last_information_target"], "catalog")
         task_trace = next(step for step in catalog["trace"] if step["step"] == "task_state")
         self.assertTrue(task_trace["selection_preserved"])

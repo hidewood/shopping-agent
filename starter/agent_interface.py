@@ -135,12 +135,49 @@ class Concept:
 
 @dataclass
 class PriceConstraint:
+    """A single-sided price comparison or an inclusive/exclusive price range.
+
+    ``operator`` / ``value`` remain accepted for older planner outputs and test
+    fixtures.  New range-aware outputs use ``min_value`` and ``max_value`` so a
+    follow-up such as “10 元以上、20 元以下” never has to discard one bound.
+    """
+
     operator: str | None = None
     value: float | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+    min_inclusive: bool = True
+    max_inclusive: bool = True
 
     @classmethod
     def from_value(cls, value: Any) -> "PriceConstraint":
         if isinstance(value, dict):
+            has_legacy_value = value.get("operator") is not None or value.get("value") is not None
+            has_range_keys = (
+                value.get("min_value") is not None
+                or value.get("max_value") is not None
+                or (
+                    not has_legacy_value
+                    and any(
+                        key in value
+                        for key in ("min_value", "max_value", "min_inclusive", "max_inclusive")
+                    )
+                )
+            )
+            if has_range_keys:
+                min_value = cls._number(value.get("min_value"))
+                max_value = cls._number(value.get("max_value"))
+                if min_value is not None and max_value is not None and min_value > max_value:
+                    raise LLMResponseError(
+                        "price_constraint min_value cannot exceed max_value.",
+                        error_code="invalid_model_output",
+                    )
+                return cls(
+                    min_value=min_value,
+                    max_value=max_value,
+                    min_inclusive=cls._boolean(value.get("min_inclusive"), True),
+                    max_inclusive=cls._boolean(value.get("max_inclusive"), True),
+                )
             operator = _optional_text(value.get("operator"))
             if operator not in {"<", "<=", "=", ">=", ">"}:
                 operator = None
@@ -149,11 +186,37 @@ class PriceConstraint:
             # Backward-compatible interpretation of the original max_price field.
             operator = "<="
             raw_number = value
-        try:
-            number = float(raw_number) if raw_number is not None else None
-        except (TypeError, ValueError):
-            number = None
+        number = cls._number(raw_number)
         return cls(operator=operator if number is not None else None, value=number)
+
+    @staticmethod
+    def _number(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _boolean(value: Any, default: bool) -> bool:
+        return value if isinstance(value, bool) else default
+
+    def has_value(self) -> bool:
+        return bool(
+            self.value is not None
+            or self.min_value is not None
+            or self.max_value is not None
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the format expected by the planner, retaining legacy single bounds."""
+        if self.operator is not None and self.value is not None:
+            return {"operator": self.operator, "value": self.value}
+        return {
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+            "min_inclusive": self.min_inclusive,
+            "max_inclusive": self.max_inclusive,
+        }
 
 
 @dataclass
@@ -215,6 +278,17 @@ CATALOG_OPERATIONS = {
     "price_extreme",
 }
 
+# Turns where the user lacks catalog information and proactive guidance helps.
+# A recommendation drawn from a small candidate pool is excluded: the answer is
+# already precise, so appending suggestions competes with it.  A recommendation
+# drawn from hundreds of candidates is included, because the single product shown
+# tells the user almost nothing about what else the catalog holds.
+PROACTIVE_RESPONSE_TYPES = {"catalog_query", "clarification", "exploration", "no_match", "recommendation"}
+
+# At or below this many matches the result set is small enough to speak for
+# itself: show every product instead of teaching the user how to narrow further.
+FEW_RESULTS_THRESHOLD = 5
+
 PLAN_GOALS = {"chat", "information", "selection", "action"}
 PLAN_TARGETS = {"none", "catalog", "product", "transaction"}
 TRANSACTION_ACTIONS = {"order.create", "order.cancel", "payment.create"}
@@ -229,23 +303,43 @@ CAPABILITY_REGISTRY = {
 
 @dataclass(frozen=True)
 class RecommendationPolicy:
-    """Product policy, not an LLM judgement, for when a selection may be made."""
+    """Product policy, not an LLM judgement, for when a selection may be made.
 
-    allow_type_only: bool = False
-    allow_explicitly_open: bool = True
+    In this catalog retrieval is almost always a better answer than a question.
+    The item type is the one genuinely blocking gap: `mug` and `shirt` are
+    disjoint sets, so without it there is nothing meaningful to retrieve.  Every
+    other missing condition is better resolved by showing real products and the
+    verified ways to narrow them, because asking about a field the catalog does
+    not record ("what material?") cannot change any filter.
+    """
 
-    def is_ready(self, requirement: ShoppingRequirement, selection_mode: str) -> bool:
+    def is_ready(self, requirement: ShoppingRequirement) -> bool:
+        return bool(requirement.item_type.raw_value)
+
+
+@dataclass(frozen=True)
+class DialoguePolicy:
+    """Choose the next conversational stage from verified, replayed state.
+
+    This policy does not parse language or choose products.  It makes the
+    multi-turn experience explicit: after a user first names a product type, the
+    agent introduces the real catalog and invites a free-form refinement instead
+    of pretending the user has already supplied a complete shopping brief.
+    """
+
+    def selection_stage(
+        self, requirement: ShoppingRequirement, selection_mode: str | None
+    ) -> str:
         if not requirement.item_type.raw_value:
-            return False
-        if selection_mode == "explicitly_open" and self.allow_explicitly_open:
-            return True
-        if self.allow_type_only:
-            return True
-        return bool(
-            requirement.price_constraint.value is not None
-            or requirement.manufacturer.raw_value
+            return "collecting"
+        has_refinement = bool(
+            requirement.manufacturer.raw_value
+            or requirement.price_constraint.has_value()
             or requirement.concepts
         )
+        if not has_refinement and selection_mode != "explicitly_open":
+            return "exploring"
+        return "recommending"
 
 
 @dataclass
@@ -368,7 +462,7 @@ class TaskContext:
     """
 
     active_task: str = "none"  # none | selection | information | action
-    selection_phase: str = "idle"  # idle | collecting | recommended | no_match
+    selection_phase: str = "idle"  # idle | collecting | exploring | recommended | no_match
     selected_product_id: str | None = None
     candidate_product_ids: list[str] = field(default_factory=list)
     last_information_target: str | None = None  # catalog | product | comparison
@@ -417,6 +511,10 @@ class GroundedRequirement:
     preferred_manufacturer: str | None = None
     price_operator: str | None = None
     price_value: float | None = None
+    min_price: float | None = None
+    max_price: float | None = None
+    min_price_inclusive: bool = True
+    max_price_inclusive: bool = True
     required_tags: list[str] = field(default_factory=list)
     preferred_tags: list[str] = field(default_factory=list)
     # Values in one group are alternative catalog mappings for the same user
@@ -618,6 +716,10 @@ class ProductRepository:
         grounded = GroundedRequirement(
             price_operator=requirement.price_constraint.operator,
             price_value=requirement.price_constraint.value,
+            min_price=requirement.price_constraint.min_value,
+            max_price=requirement.price_constraint.max_value,
+            min_price_inclusive=requirement.price_constraint.min_inclusive,
+            max_price_inclusive=requirement.price_constraint.max_inclusive,
         )
 
         item_type = self._ground_scalar(
@@ -726,6 +828,135 @@ class ProductRepository:
             "unresolved_hard_constraints": [],
         }
 
+    # Hard constraints in the order they are worth relaxing.  Item type is absent
+    # on purpose: `mug` and `shirt` are disjoint, so dropping it does not produce a
+    # near miss, it changes the request into a different one.
+    RELAXABLE_CONSTRAINTS = ("price", "manufacturer", "tags")
+
+    def closest_alternatives(
+        self, requirement: GroundedRequirement, *, limit: int = 3
+    ) -> list[dict[str, Any]]:
+        """Find near misses by dropping exactly one hard constraint at a time.
+
+        Returns one entry per constraint whose removal yields products, so the
+        caller can tell the user *which* condition blocked the search and what it
+        would cost to relax it.  Nothing here guesses: every product returned is
+        verified against all the remaining constraints.
+        """
+        if requirement.unresolved_hard_constraints:
+            # The blocker is a value the catalog does not contain at all, so
+            # relaxing a different condition cannot rescue this query.
+            return []
+        alternatives: list[dict[str, Any]] = []
+        for constraint in self.RELAXABLE_CONSTRAINTS:
+            if not self._constrains(requirement, constraint):
+                continue
+            relaxed = self._without_constraint(requirement, constraint)
+            products, _ = self.retrieve(relaxed)
+            if not products:
+                continue
+            if constraint == "price":
+                products = sorted(
+                    products,
+                    key=lambda product: (
+                        self._price_distance(product.price, requirement),
+                        product.price,
+                        product.product_id,
+                    ),
+                )
+            alternatives.append(
+                {
+                    "relaxed_constraint": constraint,
+                    "match_count": len(products),
+                    "products": [product.to_dict() for product in products[:limit]],
+                    "gap": self._constraint_gap(requirement, constraint, products[0]),
+                }
+            )
+        return alternatives
+
+    @staticmethod
+    def _constrains(requirement: GroundedRequirement, constraint: str) -> bool:
+        if constraint == "price":
+            return bool(
+                requirement.price_value is not None
+                or requirement.min_price is not None
+                or requirement.max_price is not None
+            )
+        if constraint == "manufacturer":
+            return bool(requirement.hard_manufacturer)
+        return bool(requirement.required_tag_groups or requirement.required_tags)
+
+    @staticmethod
+    def _without_constraint(
+        requirement: GroundedRequirement, constraint: str
+    ) -> GroundedRequirement:
+        relaxed = GroundedRequirement(**asdict(requirement))
+        if constraint == "price":
+            relaxed.price_operator = None
+            relaxed.price_value = None
+            relaxed.min_price = None
+            relaxed.max_price = None
+        elif constraint == "manufacturer":
+            relaxed.hard_manufacturer = None
+        else:
+            relaxed.required_tags = []
+            relaxed.required_tag_groups = []
+        return relaxed
+
+    @staticmethod
+    def _constraint_gap(
+        requirement: GroundedRequirement, constraint: str, closest: Product
+    ) -> dict[str, Any]:
+        """Quantify how far the nearest product misses, using catalog values only."""
+        if constraint == "price":
+            return {
+                "requested": ProductRepository._price_description(requirement),
+                "actual": f"${closest.price:.2f}",
+                "difference": round(
+                    ProductRepository._price_distance(closest.price, requirement), 2
+                ),
+            }
+        if constraint == "manufacturer":
+            return {
+                "requested": requirement.hard_manufacturer,
+                "actual": closest.manufacturer,
+            }
+        groups = requirement.required_tag_groups or [[tag] for tag in requirement.required_tags]
+        return {
+            "requested": [" 或 ".join(group) for group in groups],
+            "actual": closest.tags,
+        }
+
+    @staticmethod
+    def _price_distance(price: float, requirement: GroundedRequirement) -> float:
+        """Distance from a price interval; zero means the price already fits it."""
+        if requirement.min_price is not None and price < requirement.min_price:
+            return requirement.min_price - price
+        if requirement.max_price is not None and price > requirement.max_price:
+            return price - requirement.max_price
+        if requirement.price_value is None:
+            return 0.0
+        value = requirement.price_value
+        if requirement.price_operator in {"<", "<="}:
+            return max(0.0, price - value)
+        if requirement.price_operator in {">", ">="}:
+            return max(0.0, value - price)
+        return abs(price - value)
+
+    @staticmethod
+    def _price_description(requirement: GroundedRequirement) -> str:
+        if requirement.min_price is not None and requirement.max_price is not None:
+            lower = "≤" if requirement.min_price_inclusive else "<"
+            upper = "≤" if requirement.max_price_inclusive else "<"
+            return f"${requirement.min_price:.2f} {lower} 价格 {upper} ${requirement.max_price:.2f}"
+        if requirement.min_price is not None:
+            operator = "≥" if requirement.min_price_inclusive else ">"
+            return f"价格 {operator} ${requirement.min_price:.2f}"
+        if requirement.max_price is not None:
+            operator = "≤" if requirement.max_price_inclusive else "<"
+            return f"价格 {operator} ${requirement.max_price:.2f}"
+        return f"价格 {requirement.price_operator} ${requirement.price_value:.2f}"
+
     def tags_in_text(self, text: str) -> list[str]:
         """Match English catalog tags plus an explicit, verified Chinese alias subset."""
         tokens = _meaningful_tokens(text)
@@ -829,6 +1060,18 @@ class ProductRepository:
 
     @staticmethod
     def _matches_price(product: Product, requirement: GroundedRequirement) -> bool:
+        if requirement.min_price is not None:
+            if requirement.min_price_inclusive and product.price < requirement.min_price:
+                return False
+            if not requirement.min_price_inclusive and product.price <= requirement.min_price:
+                return False
+        if requirement.max_price is not None:
+            if requirement.max_price_inclusive and product.price > requirement.max_price:
+                return False
+            if not requirement.max_price_inclusive and product.price >= requirement.max_price:
+                return False
+        if requirement.min_price is not None or requirement.max_price is not None:
+            return True
         if requirement.price_operator is None or requirement.price_value is None:
             return True
         value = requirement.price_value
@@ -871,6 +1114,73 @@ class ProductRepository:
     ) -> list[Product]:
         return sorted(products, key=lambda product: cls.ranking_key(product, requirement))
 
+    @staticmethod
+    def _ranked_counts(counts: dict[str, int], limit: int) -> list[dict[str, Any]]:
+        ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        return [{"value": value, "count": count} for value, count in ordered[:limit]]
+
+    @staticmethod
+    def _price_bands(by_price: list[Product], bands: int = 3) -> list[dict[str, Any]]:
+        """Split an already price-sorted list into contiguous, non-empty bands."""
+        if len(by_price) < bands:
+            bands = 1
+        size = (len(by_price) + bands - 1) // bands
+        result: list[dict[str, Any]] = []
+        for start in range(0, len(by_price), size):
+            chunk = by_price[start : start + size]
+            if chunk:
+                result.append(
+                    {
+                        "low": chunk[0].price,
+                        "high": chunk[-1].price,
+                        "count": len(chunk),
+                    }
+                )
+        return result
+
+    def catalog_highlights(
+        self,
+        products: list[Product],
+        *,
+        top_values: int = 5,
+        sample_size: int = 3,
+    ) -> dict[str, Any]:
+        """Summarize a product set so the agent can guide the user's next turn.
+
+        Read-only and deterministic: facets are ordered by (-count, value) and
+        samples by (price, product_id), so the same product set always yields the
+        same guidance.  No model call is involved.
+        """
+        if not products:
+            return {
+                "count": 0,
+                "price_bands": [],
+                "top_tags": [],
+                "top_manufacturers": [],
+                "sample_products": [],
+            }
+        tag_counts: dict[str, int] = {}
+        manufacturer_counts: dict[str, int] = {}
+        item_type_counts: dict[str, int] = {}
+        for product in products:
+            manufacturer_counts[product.manufacturer] = (
+                manufacturer_counts.get(product.manufacturer, 0) + 1
+            )
+            item_type_counts[product.item_type] = item_type_counts.get(product.item_type, 0) + 1
+            for tag in product.tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        by_price = sorted(products, key=lambda product: (product.price, product.product_id))
+        return {
+            "count": len(products),
+            "price_min": by_price[0].price,
+            "price_max": by_price[-1].price,
+            "price_bands": self._price_bands(by_price),
+            "top_tags": self._ranked_counts(tag_counts, top_values),
+            "top_manufacturers": self._ranked_counts(manufacturer_counts, top_values),
+            "item_types": self._ranked_counts(item_type_counts, top_values),
+            "sample_products": [product.to_dict() for product in by_price[:sample_size]],
+        }
+
 
 # ===== prompts.py =====
 
@@ -886,6 +1196,38 @@ goal (chat | information | selection | action), target (none | catalog | product
 customer_reply (string or null), requirement (object or null), catalog_operations (array),
 state_action (none | merge | replace), selection_mode (criteria | explicitly_open | null),
 action (order.create | order.cancel | payment.create | null), goal_evidence (array of exact user substrings).
+
+The input includes intent_signals to help you classify ambiguous cases. Pay attention to:
+- is_likely_comparison: true when user has 2+ product IDs + comparison words
+- is_likely_catalog_query: true when user asks availability/price range without purchase intent
+- is_likely_transaction: true when user has product ID + transaction verbs
+
+## Disambiguation Examples
+
+**Catalog query (not selection):**
+- "你家有Ocean主题的马克杯吗？" → goal=information, target=catalog, operations=[count, group_by_tag]
+  (has "有吗", no purchase verb like "想买")
+- "衬衫都有什么价位？" → goal=information, target=catalog, operations=[price_range]
+  (asks about price range, not "need a shirt under $X")
+- "最便宜的马克杯多少钱？" → goal=information, target=catalog, operations=[price_extreme]
+  (asks fact about cheapest, not "buy the cheapest")
+
+**Selection (not catalog query):**
+- "我想买一个Ocean主题的马克杯" → goal=selection (has purchase intent: "想买")
+- "推荐一件T恤，预算30以内" → goal=selection (has "推荐")
+- "需要一个便宜的马克杯" → goal=selection (has "需要")
+
+**Product detail (not transaction):**
+- "P0005是什么商品？" → goal=information, target=product
+- "P0005多少钱？" → goal=information, target=product (asks about product, not ordering it)
+- "比较P0005和P0006" → goal=information, target=product (is_likely_comparison=true)
+
+**Transaction (not product detail):**
+- "下单P0005" → goal=action, target=transaction, action=order.create (has "下单")
+- "我要购买P1234" → goal=action (has transaction verb: "购买")
+- "支付P0005" → goal=action, action=payment.create
+
+Key verb signals: "有吗/都有什么/多少钱" = catalog query; "想买/推荐/需要" = selection; "下单/购买/支付" = transaction.
 
 Use goal=chat and target=none only when the latest message needs no catalog fact or external action. Set
 customer_reply to concise natural Chinese, requirement to null, catalog_operations to [], state_action to
@@ -921,7 +1263,9 @@ detail or selection. Product IDs are validated by Python.
 requirement is null except for catalog information and selection. When present, its exact keys are item_type,
 manufacturer, price_constraint, concepts, needs_clarification, clarification_question. item_type and
 manufacturer are objects with raw_value, constraint_strength, catalog_hint. price_constraint is an object
-with operator and value or null. Each concept has raw_value, kind, constraint_strength, catalog_tag_hints.
+with either legacy operator/value or min_value/max_value plus min_inclusive/max_inclusive, or null.
+Use min_value/max_value for a stated range (for example “10 元以上、20 元以下”); never drop one
+of the two bounds. Each concept has raw_value, kind, constraint_strength, catalog_tag_hints.
 constraint_strength is hard or preference. Product type and budget are hard. Style, visual motif, aesthetics,
 use case, and suitability are preferences only when the user expresses them as a preference (for example
 "喜欢", "优先", "prefer"). When a theme or style directly describes the item requested in the main clause
@@ -942,6 +1286,7 @@ def turn_planner_messages(
     conversation_context: dict[str, Any],
     shopping_context: dict[str, Any],
     catalog_context: dict[str, Any] | None = None,
+    intent_signals: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     payload = {
         "latest_user_message": instruction,
@@ -950,6 +1295,7 @@ def turn_planner_messages(
         "last_catalog_context": catalog_context or {},
         "catalog": catalog,
         "bilingual_aliases": _bilingual_alias_catalog(catalog),
+        "intent_signals": intent_signals or {},
     }
     return [
         {"role": "system", "content": TURN_PLANNER_SYSTEM_PROMPT},
@@ -1168,8 +1514,24 @@ class ShoppingAgent:
                 pending_fields=["item_type"],
             )
 
+        if self._looks_like_inverted_price_range(message):
+            question = "价格区间的下限不能高于上限。请重新说明，例如“10 元以上、20 元以下”。"
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace + [{"step": "input_integrity", "status": "clarification_required", "fields": ["price_constraint"]}],
+                question,
+                "clarification",
+                pending_question=question,
+                pending_fields=["price_constraint"],
+            )
+
         previous = self._reduce_requirement(state)
         plan = self._create_turn_plan(message, state, previous, trace)
+        plan = self._enforce_pending_price_refinement(
+            plan, message, state, previous, trace
+        )
         if plan.goal == "chat":
             return self._finish_turn(
                 state,
@@ -1267,24 +1629,31 @@ class ShoppingAgent:
                 "active_requirements": requirement.to_dict(),
             }
         )
+        dialogue_stage = DialoguePolicy().selection_stage(requirement, plan.selection_mode)
+        trace.append(
+            {
+                "step": "dialogue_policy",
+                "status": "completed",
+                "stage": dialogue_stage,
+                "reason": "type_only_exploration" if dialogue_stage == "exploring" else "selection_ready",
+            }
+        )
 
-        readiness_policy = RecommendationPolicy()
         # The model may suggest a clarification question, but it must not veto a
-        # request that already satisfies the product-level readiness policy.
-        # Otherwise an occasional over-cautious `needs_clarification=true` makes
-        # identical, sufficient requests non-deterministically stop early.
-        if not readiness_policy.is_ready(requirement, plan.selection_mode or "criteria"):
-            pending_fields = ["item_type"] if not requirement.item_type.raw_value else ["shopping_detail"]
-            question = parsed.clarification_question or "请补充预算、主题、品牌或用途；也可以明确说明没有特别偏好。"
+        # request the policy considers retrievable.  Otherwise an occasional
+        # over-cautious `needs_clarification=true` makes identical requests
+        # non-deterministically stop early.
+        if not RecommendationPolicy().is_ready(requirement):
+            question = "请先告诉我想买哪类商品：mug（马克杯）还是 shirt（T 恤）？"
             return self._finish_turn(
                 state,
                 message,
                 None,
-                trace + [{"step": "clarification", "status": "requested", "fields": pending_fields}],
+                trace + [{"step": "clarification", "status": "requested", "fields": ["item_type"]}],
                 question,
                 "clarification",
                 pending_question=question,
-                pending_fields=pending_fields,
+                pending_fields=["item_type"],
             )
 
         grounded = self.repository.ground(requirement)
@@ -1305,13 +1674,54 @@ class ShoppingAgent:
             }
         )
         if not candidates:
+            alternatives = self.repository.closest_alternatives(grounded)
+            trace.append(
+                {
+                    "step": "closest_alternative_search",
+                    "status": "completed",
+                    "handler": "single_constraint_relaxation",
+                    "relaxed_constraints": [
+                        item["relaxed_constraint"] for item in alternatives
+                    ],
+                }
+            )
             return self._finish_turn(
                 state,
                 message,
                 None,
                 trace + [{"step": "decision", "status": "no_match"}],
-                self._no_match_summary(grounded),
+                self._no_match_summary(grounded, alternatives),
                 "no_match",
+                catalog_data={"kind": "closest_alternatives", "alternatives": alternatives},
+            )
+
+        if dialogue_stage == "exploring":
+            highlights = self.repository.catalog_highlights(candidates)
+            question = "你更在意预算、主题，还是某个厂商？也可以直接告诉我你想优先满足的条件。"
+            trace.append(
+                {
+                    "step": "catalog_exploration",
+                    "status": "completed",
+                    "sample_product_ids": [item["product_id"] for item in highlights["sample_products"]],
+                    "catalog_count": highlights["count"],
+                }
+            )
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace,
+                self._exploration_summary(requirement, highlights, question),
+                "exploration",
+                pending_question=question,
+                pending_fields=["price_constraint", "concept", "manufacturer"],
+                catalog_data={
+                    "kind": "exploration",
+                    "total_count": highlights["count"],
+                    "products": highlights["sample_products"],
+                    "highlights": highlights,
+                },
+                guidance_products=candidates,
             )
 
         decision, selected = self._rank_candidates(grounded, candidates, trace)
@@ -1322,6 +1732,7 @@ class ShoppingAgent:
             trace,
             self._format_summary(selected, decision),
             "recommendation",
+            guidance_products=candidates,
         )
 
     def _handle_action_request(
@@ -1447,6 +1858,8 @@ class ShoppingAgent:
                 "catalog_query",
                 update_shopping_state=False,
                 catalog_data={"kind": "catalog_query", "operations": effective_operations, "products": [], "total_count": 0, "resolution_statuses": resolution_statuses},
+                guidance_products=self._products_of_type(grounded.item_type),
+                guidance_kind="no_match",
             )
 
         scope = self._catalog_scope_label(grounded)
@@ -1527,6 +1940,7 @@ class ShoppingAgent:
             "catalog_query",
             update_shopping_state=False,
             catalog_data=data,
+            guidance_products=products,
         )
 
     def _handle_product_detail(
@@ -1641,7 +2055,13 @@ class ShoppingAgent:
 
     @staticmethod
     def _product_ids_in_message(message: str) -> list[str]:
-        return _deduplicate(match.upper() for match in re.findall(r"\bP\d{4}\b", message, flags=re.IGNORECASE))
+        # Use lookahead/lookbehind to handle Chinese characters adjacent to product IDs
+        # \b doesn't work with non-ASCII characters, so we match P followed by 4 digits
+        # and ensure it's not part of a longer alphanumeric sequence
+        return _deduplicate(
+            match.upper()
+            for match in re.findall(r"(?<![A-Za-z0-9])P\d{4}(?![A-Za-z0-9])", message, flags=re.IGNORECASE)
+        )
 
     @staticmethod
     def _catalog_scope_label(requirement: GroundedRequirement) -> str:
@@ -1696,8 +2116,8 @@ class ShoppingAgent:
         if parsed.manufacturer.raw_value:
             operation = "replace" if base.manufacturer.raw_value else "set"
             add("manufacturer", operation, asdict(parsed.manufacturer))
-        if parsed.price_constraint.value is not None:
-            operation = "replace" if base.price_constraint.value is not None else "set"
+        if parsed.price_constraint.has_value():
+            operation = "replace" if base.price_constraint.has_value() else "set"
             add("price_constraint", operation, asdict(parsed.price_constraint))
 
         def concept_key(concept: Concept) -> tuple[str, ...]:
@@ -1778,6 +2198,8 @@ class ShoppingAgent:
         pending_fields: list[str] | None = None,
         update_shopping_state: bool = True,
         catalog_data: dict[str, Any] | None = None,
+        guidance_products: list[Product] | None = None,
+        guidance_kind: str | None = None,
     ) -> dict[str, Any]:
         if update_shopping_state:
             state.pending_question = pending_question
@@ -1795,6 +2217,21 @@ class ShoppingAgent:
         bare_result["response_type"] = response_type
         if catalog_data is not None:
             bare_result["catalog_data"] = catalog_data
+        guidance = self._build_proactive_guidance(
+            state, response_type, guidance_products, guidance_kind
+        )
+        if guidance is not None:
+            bare_result["proactive_guidance"] = guidance
+            trace.append(
+                {
+                    "step": "proactive_guidance",
+                    "status": "completed",
+                    "handler": "deterministic_catalog_summary",
+                    "kind": guidance["kind"],
+                    "scope_product_count": guidance["scope_product_count"],
+                    "example_phrase_count": len(guidance["example_phrases"]),
+                }
+            )
         state.add_event("assistant_message", {"result": bare_result})
         result = dict(bare_result)
         result["conversation_state"] = state.to_dict()
@@ -1827,6 +2264,19 @@ class ShoppingAgent:
                 "phase": context.selection_phase,
                 "selected_product_id": product_id,
             }
+        elif response_type == "exploration" and update_shopping_state:
+            products = (catalog_data or {}).get("products", [])
+            context.active_task = "selection"
+            context.selection_phase = "exploring"
+            context.selected_product_id = None
+            context.candidate_product_ids = [
+                str(product.get("product_id")) for product in products if product.get("product_id")
+            ]
+            transition = {
+                "task": "selection",
+                "phase": "exploring",
+                "sample_product_ids": list(context.candidate_product_ids),
+            }
         elif response_type == "clarification" and update_shopping_state:
             context.active_task = "selection"
             context.selection_phase = "collecting"
@@ -1843,7 +2293,9 @@ class ShoppingAgent:
                 "task": "information",
                 "target": "catalog",
                 "operations": operations,
-                "selection_preserved": context.selection_phase == "collecting",
+                # A read-only query leaves any live selection task untouched,
+                # whether it is still collecting or already holding a pick.
+                "selection_preserved": context.active_task == "selection",
             }
         elif response_type in {"product_detail", "product_comparison"}:
             products = (catalog_data or {}).get("products", [])
@@ -1895,6 +2347,221 @@ class ShoppingAgent:
                     return canonical
         return None
 
+    def _products_of_type(self, item_type: str | None) -> list[Product]:
+        """All catalog rows of one verified type, or the whole catalog when unknown."""
+        if not item_type:
+            return list(self.repository.products)
+        return [
+            product for product in self.repository.products if product.item_type == item_type
+        ]
+
+    def _guidance_scope(
+        self, state: ConversationState, guidance_products: list[Product] | None
+    ) -> list[Product]:
+        """Choose the product set the guidance describes, without touching state.
+
+        A catalog answer guides over exactly the rows it returned.  A clarification
+        or no-match turn has no useful result set, so it widens to the item type the
+        user already named, or to the whole catalog when even that is unknown.
+        """
+        if guidance_products is not None:
+            return guidance_products
+        return self._products_of_type(
+            self._canonical_item_type(self._reduce_requirement(state).item_type)
+        )
+
+    def _build_proactive_guidance(
+        self,
+        state: ConversationState,
+        response_type: str,
+        guidance_products: list[Product] | None,
+        guidance_kind: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Turn a verified product set into concrete next steps for the user.
+
+        This is deterministic catalog reporting, not a second recommendation: every
+        number and option below is computed from products Python already retrieved,
+        so it cannot claim inventory the catalog does not have.
+        """
+        if response_type not in PROACTIVE_RESPONSE_TYPES:
+            return None
+        scope = self._guidance_scope(state, guidance_products)
+        highlights = self.repository.catalog_highlights(scope)
+        if not highlights["count"]:
+            return None
+        # A small result set is already a precise answer; guidance would only
+        # repeat what the user can see.
+        if highlights["count"] <= FEW_RESULTS_THRESHOLD and response_type == "recommendation":
+            return None
+        # A catalog query that matched nothing must not describe "this batch";
+        # it needs the same relaxation wording as a failed selection.
+        builder = {
+            "catalog_query": self._catalog_query_guidance,
+            "clarification": self._clarification_guidance,
+            "exploration": self._exploration_guidance,
+            "no_match": self._no_match_guidance,
+            "recommendation": self._recommendation_guidance,
+        }[guidance_kind or response_type]
+        guidance = builder(highlights)
+        guidance["scope_product_count"] = highlights["count"]
+        return guidance
+
+    @staticmethod
+    def _tag_phrase(highlights: dict[str, Any], limit: int = 3) -> str:
+        return "、".join(
+            f"{entry['value']}（{entry['count']} 件）"
+            for entry in highlights["top_tags"][:limit]
+        )
+
+    @staticmethod
+    def _price_phrase(highlights: dict[str, Any]) -> str:
+        return f"${highlights['price_min']:.2f} 到 ${highlights['price_max']:.2f}"
+
+    @classmethod
+    def _example_phrases(cls, highlights: dict[str, Any]) -> list[str]:
+        """Concrete utterances the user can reuse, derived from verified values.
+
+        These are phrasing examples, not clickable commands: the point is to teach
+        the user how to express a constraint, so the next turn stays a natural
+        language turn and the model keeps doing the understanding.
+        """
+        phrases: list[str] = []
+        bands = highlights["price_bands"]
+        if bands:
+            phrases.append(f"预算 {bands[0]['high']:.0f} 以内")
+        for entry in highlights["top_tags"][:2]:
+            phrases.append(f"{entry['value']} 风格的")
+        manufacturers = highlights["top_manufacturers"]
+        if manufacturers:
+            phrases.append(f"{manufacturers[0]['value']} 这个厂商的")
+        return phrases
+
+    @classmethod
+    def _catalog_query_guidance(cls, highlights: dict[str, Any]) -> dict[str, Any]:
+        """After a read-only answer, describe the range and how to narrow it."""
+        return {
+            "kind": "catalog_followup",
+            "message": (
+                f"这批商品价格在 {cls._price_phrase(highlights)} 之间，"
+                f"最常见的风格是 {cls._tag_phrase(highlights)}。"
+                "想让我按预算或风格挑一件的话，直接说就行。"
+            ),
+            "example_phrases": cls._example_phrases(highlights),
+        }
+
+    @classmethod
+    def _clarification_guidance(cls, highlights: dict[str, Any]) -> dict[str, Any]:
+        """The item type is missing; state what the catalog carries in each type."""
+        types = "、".join(
+            f"{entry['value']}（{entry['count']} 件）" for entry in highlights["item_types"]
+        )
+        return {
+            "kind": "selection_scope",
+            "message": (
+                f"目录里共有 {highlights['count']} 件商品：{types}，"
+                f"价格在 {cls._price_phrase(highlights)} 之间。"
+                "告诉我想买哪一类，也可以顺便带上预算或风格。"
+            ),
+            "example_phrases": ["马克杯", "T恤", "预算 15 以内的马克杯"],
+        }
+
+    @classmethod
+    def _no_match_guidance(cls, highlights: dict[str, Any]) -> dict[str, Any]:
+        """Report which prices and themes are actually reachable after relaxing."""
+        return {
+            "kind": "relaxation_hint",
+            "message": (
+                f"这个类别下共有 {highlights['count']} 件商品，"
+                f"价格从 ${highlights['price_min']:.2f} 起，"
+                f"较多的风格是 {cls._tag_phrase(highlights)}。"
+            ),
+            "example_phrases": cls._example_phrases(highlights),
+        }
+
+    @classmethod
+    def _recommendation_guidance(cls, highlights: dict[str, Any]) -> dict[str, Any]:
+        """A single pick out of hundreds hides the catalog; show what else fits."""
+        samples = highlights["sample_products"][1:3]
+        alternatives = "；".join(
+            f"{product['name']}（{product['product_id']}，${product['price']:.2f}）"
+            for product in samples
+        )
+        message = (
+            f"符合条件的一共有 {highlights['count']} 件，"
+            f"价格在 {cls._price_phrase(highlights)} 之间。"
+        )
+        if alternatives:
+            message += f"同价位附近还有：{alternatives}。"
+        message += f"这批商品里较多的风格是 {cls._tag_phrase(highlights)}，可以再收窄。"
+        return {
+            "kind": "narrowing_hint",
+            "message": message,
+            "example_phrases": cls._example_phrases(highlights),
+        }
+
+    def _preprocess_intent_signals(self, message: str, state: ConversationState) -> dict[str, Any]:
+        """Identify strong intent signals before LLM call to reduce ambiguity."""
+        lower = message.casefold()
+        product_ids = self._product_ids_in_message(message)
+
+        # Strong signal: explicit comparison with product IDs
+        has_comparison_words = bool(re.search(r"比较|对比|compare|difference|vs\.?", lower))
+
+        # Strong signal: catalog query keywords (availability, price range, etc.)
+        # Split into multiple patterns for better matching
+        has_catalog_query_words = bool(
+            re.search(r"有.{0,20}吗", message) or  # "有...吗？" pattern
+            re.search(r"有哪些|有什么|都有", message) or
+            re.search(r"价位|价格范围|多少钱|最便宜|最贵|最低|最高", message) or
+            re.search(r"catalog|price range|available|cheapest|most expensive", lower)
+        )
+
+        # Strong signal: explicit transaction verbs
+        has_transaction_words = bool(re.search(
+            r"下单|购买|支付|取消订单|order|buy|purchase|pay|cancel",
+            lower
+        ))
+
+        # Strong signal: selection/recommendation verbs
+        has_selection_words = bool(re.search(
+            r"想买|需要|推荐|帮我选|要买|给我找|need|want|recommend|find me",
+            lower
+        ))
+        has_product_detail_words = bool(re.search(
+            r"详情|描述|标签|介绍|什么商品|多少钱|价格|detail|description|tags?|what is|price",
+            lower,
+        ))
+
+        return {
+            "explicit_product_ids": product_ids,
+            "has_comparison_words": has_comparison_words,
+            "has_catalog_query_words": has_catalog_query_words,
+            "has_transaction_words": has_transaction_words,
+            "has_selection_words": has_selection_words,
+            "has_product_detail_words": has_product_detail_words,
+            "pending_question_continuation": bool(state.pending_question and len(message.strip()) < 50),
+            "is_likely_comparison": len(product_ids) >= 2 and has_comparison_words,
+            "is_likely_catalog_query": has_catalog_query_words and not has_selection_words,
+            "is_likely_transaction": len(product_ids) >= 1 and has_transaction_words,
+            "is_likely_product_detail": (
+                len(product_ids) == 1
+                and has_product_detail_words
+                and not has_transaction_words
+            ),
+        }
+
+    @classmethod
+    def _exploration_guidance(cls, highlights: dict[str, Any]) -> dict[str, Any]:
+        """Invite a free-form refinement after introducing a broad category."""
+        return {
+            "kind": "exploration_prompt",
+            "message": (
+                "我还没有把预算、主题或厂商设成筛选条件。"
+                "你可以按自己在意的维度继续描述，我会只更新你明确提出的条件。"
+            ),
+            "example_phrases": cls._example_phrases(highlights),
+        }
+
     def _create_turn_plan(
         self,
         message: str,
@@ -1905,6 +2572,15 @@ class ShoppingAgent:
         """Create the one declarative plan used by the public turn execution path."""
         if self.llm is None:
             raise LLMResponseError(self._settings_error or "Model client was unavailable.", error_code="configuration")
+
+        # Phase 1: Preprocess intent signals
+        signals = self._preprocess_intent_signals(message, state)
+        trace.append({
+            "step": "intent_signal_detection",
+            "status": "completed",
+            "signals": signals,
+        })
+
         context = {"recent_messages": self._recent_conversation_messages(state)}
         shopping_context = self._shopping_context(state, previous)
         planner_messages = turn_planner_messages(
@@ -1913,11 +2589,31 @@ class ShoppingAgent:
             context,
             shopping_context,
             state.last_catalog_context,
+            signals,  # Pass signals to help guide the model
         )
         try:
             raw_plan = self.llm.chat_json(planner_messages)
             try:
                 plan = TurnPlan.from_dict(raw_plan)
+                mismatch = self._strong_signal_plan_mismatch(plan, signals)
+                evidence_status, evidence_error = self._goal_evidence_status(plan, message, state)
+                # Evidence is valuable for replay and evaluation, but selection is
+                # not an irreversible action.  Treat a paraphrased evidence quote
+                # as an audit warning there, otherwise harmless variants such as
+                # “我想买个礼物” / “我想买礼物” can fail the entire customer turn.
+                # Transaction plans remain strict because their evidence is the
+                # user's authorization for an external action.
+                if plan.goal == "action":
+                    mismatch = mismatch or evidence_error
+                if mismatch:
+                    trace.append(
+                        {
+                            "step": "intent_plan_consistency",
+                            "status": "mismatch",
+                            "warning": mismatch,
+                        }
+                    )
+                    raise LLMResponseError(mismatch, error_code="invalid_model_output")
             except LLMResponseError as exc:
                 if exc.error_code != "invalid_model_output":
                     raise
@@ -1932,7 +2628,29 @@ class ShoppingAgent:
                     turn_plan_repair_messages(raw_plan, str(exc))
                 )
                 plan = TurnPlan.from_dict(repaired_plan)
+                repaired_mismatch = self._strong_signal_plan_mismatch(plan, signals)
+                evidence_status, evidence_error = self._goal_evidence_status(plan, message, state)
+                if plan.goal == "action":
+                    repaired_mismatch = repaired_mismatch or evidence_error
+                if repaired_mismatch:
+                    raise LLMResponseError(repaired_mismatch, error_code="invalid_model_output")
                 trace.append({"step": "turn_plan_repair", "status": "completed"})
+            else:
+                evidence_status, _ = self._goal_evidence_status(plan, message, state)
+            trace.append(
+                {
+                    "step": "intent_plan_consistency",
+                    "status": "completed",
+                    "strong_signal": self._strongest_intent_signal(signals),
+                }
+            )
+            trace.append(
+                {
+                    "step": "goal_evidence",
+                    "status": evidence_status,
+                    "evidence": list(plan.goal_evidence),
+                }
+            )
             trace.append(
                 {
                     "step": "turn_planning",
@@ -1961,6 +2679,55 @@ class ShoppingAgent:
             exc.workflow_trace = list(trace)
             raise
 
+    def _enforce_pending_price_refinement(
+        self,
+        plan: TurnPlan,
+        message: str,
+        state: ConversationState,
+        previous: ShoppingRequirement,
+        trace: list[dict[str, Any]],
+    ) -> TurnPlan:
+        """Route a high-confidence budget answer back into the active selection.
+
+        “有没有 10 块以上、20 元以下的” contains catalog-query words, but
+        when it answers the pending budget question for an existing item type it
+        is a refinement, not a fresh read-only catalog task.  Python owns this
+        state transition so the planner cannot silently drop a valid price slot.
+        """
+        resolved = self._price_constraint_from_instruction(message)
+        is_pending_selection = (
+            state.task_context.active_task == "selection"
+            and "price_constraint" in state.pending_fields
+            and bool(previous.item_type.raw_value)
+        )
+        if (
+            not is_pending_selection
+            or not resolved.has_value()
+            or self._product_ids_in_message(message)
+        ):
+            return plan
+
+        trace.append(
+            {
+                "step": "pending_price_refinement",
+                "status": "enforced",
+                "previous_goal": plan.goal,
+                "previous_target": plan.target,
+                "price_constraint": resolved.to_dict(),
+            }
+        )
+        return TurnPlan(
+            goal="selection",
+            target="catalog",
+            customer_reply=None,
+            requirement=ShoppingRequirement(price_constraint=resolved),
+            catalog_operations=[],
+            state_action="merge",
+            selection_mode="criteria",
+            action=None,
+            goal_evidence=[],
+        )
+
     @staticmethod
     def _shopping_context(
         state: ConversationState, requirement: ShoppingRequirement
@@ -1970,13 +2737,66 @@ class ShoppingAgent:
             "has_active_shopping_request": bool(
                 requirement.item_type.raw_value
                 or requirement.manufacturer.raw_value
-                or requirement.price_constraint.value is not None
+                or requirement.price_constraint.has_value()
                 or requirement.concepts
             ),
             "pending_shopping_question": state.pending_question,
             "pending_shopping_fields": list(state.pending_fields),
             "task_context": state.task_context.to_dict(),
         }
+
+    @staticmethod
+    def _strongest_intent_signal(signals: dict[str, Any]) -> str | None:
+        """Return the unambiguous intent signal that must agree with the plan."""
+        if signals.get("is_likely_comparison"):
+            return "product_comparison"
+        if signals.get("is_likely_transaction"):
+            return "transaction"
+        if signals.get("is_likely_product_detail"):
+            return "product_detail"
+        return None
+
+    @classmethod
+    def _strong_signal_plan_mismatch(cls, plan: TurnPlan, signals: dict[str, Any]) -> str | None:
+        """Guard explicit product-ID requests against a semantically wrong model route.
+
+        This guard deliberately covers only high-confidence shapes.  Open-ended
+        recommendation and catalog utterances remain the planner's responsibility.
+        """
+        signal = cls._strongest_intent_signal(signals)
+        if signal == "product_comparison" and (plan.goal, plan.target) != ("information", "product"):
+            return "Explicit product IDs with a comparison request must route to product information."
+        if signal == "product_detail" and (plan.goal, plan.target) != ("information", "product"):
+            return "An explicit product-detail request must route to product information."
+        if signal == "transaction" and (
+            (plan.goal, plan.target) != ("action", "transaction") or not plan.action
+        ):
+            return "An explicit transaction request must route to the transaction capability check."
+        return None
+
+    @staticmethod
+    def _goal_evidence_status(
+        plan: TurnPlan, message: str, state: ConversationState
+    ) -> tuple[str, str | None]:
+        """Audit planner evidence without making a terse follow-up impossible.
+
+        A supplied evidence fragment must literally occur in the latest message.
+        Empty evidence remains allowed for an answer to a pending question, and is
+        recorded as missing otherwise so it can be measured before being made a
+        hard production requirement.
+        """
+        if plan.goal not in {"selection", "action"}:
+            return "not_required", None
+        if not plan.goal_evidence:
+            return ("pending_follow_up" if state.pending_question else "missing"), None
+        message_normalized = message.casefold()
+        invalid = [
+            evidence for evidence in plan.goal_evidence
+            if evidence.casefold() not in message_normalized
+        ]
+        if invalid:
+            return "mismatch", "Plan evidence must quote the latest user message."
+        return "verified", None
 
     @staticmethod
     def _recent_conversation_messages(state: ConversationState, limit: int = 4) -> list[dict[str, str]]:
@@ -2079,6 +2899,25 @@ class ShoppingAgent:
         return decision, selected
 
     @staticmethod
+    def _exploration_summary(
+        requirement: ShoppingRequirement,
+        highlights: dict[str, Any],
+        question: str,
+    ) -> str:
+        """Describe a broad catalog slice without turning it into a premature pick."""
+        item_type = requirement.item_type.raw_value or "这类商品"
+        top_tags = "、".join(
+            f"{entry['value']}（{entry['count']} 件）"
+            for entry in highlights["top_tags"][:3]
+        )
+        tag_sentence = f"常见主题有 {top_tags}。" if top_tags else ""
+        return (
+            f"我先按“{item_type}”帮你浏览了商品库：共有 {highlights['count']} 件，"
+            f"价格从 ${highlights['price_min']:.2f} 到 ${highlights['price_max']:.2f}。"
+            f"{tag_sentence}下面展示了几件价格较低的商品作为参考。{question}"
+        )
+
+    @staticmethod
     def _format_summary(selected: Product, decision: PurchaseDecision) -> str:
         match_note = ""
         if decision.match_level == "closest_alternative":
@@ -2092,7 +2931,10 @@ class ShoppingAgent:
         return summary
 
     @staticmethod
-    def _no_match_summary(requirement: GroundedRequirement) -> str:
+    def _no_match_summary(
+        requirement: GroundedRequirement,
+        alternatives: list[dict[str, Any]] | None = None,
+    ) -> str:
         if requirement.unresolved_hard_constraints:
             return "商品库无法满足以下硬性条件：" + "；".join(requirement.unresolved_hard_constraints) + "。"
         constraints = []
@@ -2100,17 +2942,47 @@ class ShoppingAgent:
             constraints.append(f"类型为 {requirement.item_type}")
         if requirement.hard_manufacturer:
             constraints.append(f"制造商为 {requirement.hard_manufacturer}")
-        if requirement.price_operator and requirement.price_value is not None:
-            constraints.append(
-                f"价格 {requirement.price_operator} ${requirement.price_value:.2f}"
-            )
+        if ProductRepository._constrains(requirement, "price"):
+            constraints.append(ProductRepository._price_description(requirement))
         tag_groups = requirement.required_tag_groups or [[tag] for tag in requirement.required_tags]
         if tag_groups:
             constraints.append(
                 "标签包含 " + " 且 ".join("（" + " 或 ".join(group) + "）" for group in tag_groups)
             )
         detail = "、".join(constraints) or "当前条件"
-        return f"商品库中没有同时满足{detail}的商品。可以尝试放宽预算、品牌或主题条件。"
+        summary = f"商品库中没有同时满足{detail}的商品。"
+        if not alternatives:
+            return summary + "可以尝试放宽预算、品牌或主题条件。"
+        return summary + ShoppingAgent._relaxation_advice(alternatives)
+
+    @staticmethod
+    def _relaxation_advice(alternatives: list[dict[str, Any]]) -> str:
+        """State which single condition blocked the search, with the real near miss."""
+        labels = {"price": "预算", "manufacturer": "厂商", "tags": "主题"}
+        parts: list[str] = []
+        for item in alternatives:
+            constraint = item["relaxed_constraint"]
+            closest = item["products"][0]
+            gap = item["gap"]
+            product = f"{closest['name']}（{closest['product_id']}，${closest['price']:.2f}）"
+            if constraint == "price":
+                parts.append(
+                    f"若放宽价格条件（{gap['requested']}），可选 {product}"
+                    f"，它满足其余全部条件"
+                )
+            elif constraint == "manufacturer":
+                parts.append(
+                    f"若不限定厂商 {gap['requested']}，可选 {product}"
+                    f"，厂商为 {gap['actual']}"
+                )
+            else:
+                parts.append(
+                    f"若不限定主题，可选 {product}，其标签为 {'、'.join(gap['actual'])}"
+                )
+        joined = "；".join(parts)
+        others = sum(item["match_count"] for item in alternatives) - len(alternatives)
+        tail = f"。放宽后另有 {others} 件可选。" if others > 0 else "。"
+        return f"最接近的结果是：{joined}{tail}"
 
     @staticmethod
     def _looks_like_missing_price(instruction: str) -> bool:
@@ -2127,7 +2999,7 @@ class ShoppingAgent:
     ) -> None:
         """Resolve common natural-language price operators independently of model phrasing."""
         resolved = ShoppingAgent._price_constraint_from_instruction(instruction)
-        if resolved.value is None:
+        if not resolved.has_value():
             return
         if requirement.price_constraint != resolved:
             trace.append(
@@ -2136,12 +3008,28 @@ class ShoppingAgent:
                     "status": "completed",
                     "operator": resolved.operator,
                     "value": resolved.value,
+                    "price_constraint": resolved.to_dict(),
                 }
             )
             requirement.price_constraint = resolved
 
     @staticmethod
     def _price_constraint_from_instruction(instruction: str) -> PriceConstraint:
+        """Parse high-confidence bilingual price bounds without relying on the LLM.
+
+        The range patterns run first so “10 块以上、20 元以下” is represented
+        as two bounds rather than accidentally being collapsed into one budget.
+        """
+        bounds = ShoppingAgent._price_range_bounds_from_instruction(instruction)
+        if bounds is not None:
+            minimum, maximum = bounds
+            if minimum > maximum:
+                return PriceConstraint()
+            return PriceConstraint(
+                min_value=minimum,
+                max_value=maximum,
+            )
+
         match = re.search(
             r"\b(?P<phrase>under|less than|below|at most|no more than|within)\s*\$?\s*"
             r"(?P<value>\d+(?:\.\d+)?)",
@@ -2153,15 +3041,59 @@ class ShoppingAgent:
             return PriceConstraint(operator=operator, value=float(match.group("value")))
 
         chinese_match = re.search(
-            r"(?P<phrase>低于|小于|不超过|不高于|最多|预算(?:为|是)?)\s*[$￥¥]?\s*"
+            r"(?P<phrase>低于|小于|不超过|不高于|最多|以下|以内|预算(?:为|是)?)\s*[$￥¥]?\s*"
             r"(?P<value>\d+(?:\.\d+)?)",
             instruction,
         )
-        if not chinese_match:
-            return PriceConstraint()
-        phrase = chinese_match.group("phrase")
-        operator = "<" if phrase in {"低于", "小于"} else "<="
-        return PriceConstraint(operator=operator, value=float(chinese_match.group("value")))
+        if chinese_match:
+            phrase = chinese_match.group("phrase")
+            operator = "<" if phrase in {"低于", "小于"} else "<="
+            return PriceConstraint(operator=operator, value=float(chinese_match.group("value")))
+
+        chinese_upper = re.search(
+            r"(?P<value>\d+(?:\.\d+)?)\s*(?:元|块)?\s*(?P<phrase>以下|以内)",
+            instruction,
+        )
+        if chinese_upper:
+            return PriceConstraint(
+                operator="<=",
+                value=float(chinese_upper.group("value")),
+            )
+
+        chinese_lower = re.search(
+            r"(?P<value>\d+(?:\.\d+)?)\s*(?:元|块)?\s*(?P<phrase>以上|不少于|不低于|至少)",
+            instruction,
+        )
+        if chinese_lower:
+            return PriceConstraint(
+                operator=">=",
+                value=float(chinese_lower.group("value")),
+            )
+        return PriceConstraint()
+
+    @staticmethod
+    def _price_range_bounds_from_instruction(instruction: str) -> tuple[float, float] | None:
+        """Extract two stated price bounds without deciding whether their order is valid."""
+        number = r"\d+(?:\.\d+)?"
+        currency = r"(?:[$￥¥]|元|块|rmb|yuan|dollars?)?"
+        patterns = (
+            rf"(?P<min>{number})\s*{currency}\s*(?:及)?以上\s*(?:到|至|[-~—,，、])?\s*"
+            rf"(?P<max>{number})\s*{currency}\s*(?:及)?以下",
+            rf"\b(?:between|from)\s*[$￥¥]?\s*(?P<min>{number})\s*"
+            rf"(?:and|to|-)\s*[$￥¥]?\s*(?P<max>{number})\b",
+            rf"(?P<min>{number})\s*{currency}\s*(?:到|至|[-~—])\s*"
+            rf"(?P<max>{number})\s*{currency}",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, instruction, flags=re.IGNORECASE)
+            if match:
+                return float(match.group("min")), float(match.group("max"))
+        return None
+
+    @staticmethod
+    def _looks_like_inverted_price_range(instruction: str) -> bool:
+        bounds = ShoppingAgent._price_range_bounds_from_instruction(instruction)
+        return bool(bounds and bounds[0] > bounds[1])
 
     def _enforce_primary_topic_constraints(
         self, instruction: str, requirement: ShoppingRequirement, trace: list[dict[str, Any]]

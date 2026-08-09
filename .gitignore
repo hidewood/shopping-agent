@@ -16,6 +16,9 @@ outputs/
 # Source copies of screenshots are staged under docs/screenshots/ for submission.
 photos/
 
+# Raw local screenshots captured during ad-hoc manual testing.
+test_photos/
+
 # Editor, operating-system and temporary files
 .idea/
 .vscode/
@@ -24,3 +27,5 @@ Thumbs.db
 *.log
 *.tmp
 *.swp
+
+CLAUDE.md

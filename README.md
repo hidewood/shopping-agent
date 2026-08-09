@@ -27,13 +27,15 @@ data/
   tasks.jsonl                  # 50 条公开评测任务
   metadata.json                # 数据来源与许可证
 tests/
-  test_product_repository.py   # 离线回归测试
+  test_product_repository.py   # 商品库、状态与推荐的离线回归
+  test_intent_signals.py       # 强意图信号与路由一致性测试
+  test_proactive_guidance.py   # 目录接地的主动引导测试
+  test_price_ranges.py         # 中英文价格区间与多轮补充测试
   test_live_api_smoke.py       # 可选真实 API 冒烟测试
   task_evaluation.py           # 50 条任务评测及报告生成器
 docs/
   experiment-report.md         # 实验报告：模型、工作流、提示词与工具设计
-  task-evaluation.md           # 测试报告：50 条评测与人工核验记录
-  任务1_Agent工作流构建_题目.md # 题目原文
+  test-report.md               # 自动化结果、人工用例与通过标准
   screenshots/                 # 人工核验截图
 ```
 
@@ -57,7 +59,7 @@ Copy-Item .env.example .env
 
 ```env
 DEEPSEEK_API_KEY=your_api_key_here
-DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=45
 DEEPSEEK_MAX_RETRIES=1
 ```
@@ -80,15 +82,15 @@ streamlit run app.py
 python -m unittest discover -s tests -v
 ```
 
-当前基线：测试套件共 60 项，其中 **59 项离线回归通过**；另有 1 项真实 API 冒烟测试默认跳过。
+当前基线（2026-08-09）：测试套件共 104 项，其中 **103 项离线回归通过**；另有 1 项真实 API 冒烟测试默认跳过。价格范围、多轮填槽、意图路由与主动引导均包含在离线回归内。
 
 执行 50 条公开任务评测（会调用真实 DeepSeek API）：
 
 ```bash
-python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output docs/task-evaluation.md
+python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output outputs/task-evaluation.md
 ```
 
-最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。逐项结果与人工核验记录见 [测试报告](docs/task-evaluation.md)。
+最新评测结果：**50/50 通过，成功率 100%**。评测会核验实际返回商品的类型、主题、预算、严格厂商条件、可用优先厂商，以及 trace 中的确定性候选排序。自动化结果摘要与人工核验记录见 [测试报告](docs/test-report.md)。
 
 ## 人工核验展示
 
@@ -101,7 +103,7 @@ python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown
 | 商品详情与比较 | 真实 ID 驱动的只读工具调用 | R05 |
 | 商品库浏览 | 分页、关键词检索与按商品类型筛选 | R06 |
 
-六个场景的输入、关键处理过程和结果说明见 [测试报告](docs/task-evaluation.md#代表性人工运行记录)。
+六个场景的输入、关键处理过程和结果说明见 [测试报告](docs/test-report.md)。
 
 <details>
 <summary>展开查看 6 张人工核验截图</summary>
@@ -123,8 +125,7 @@ python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown
 ## 提交文档
 
 - [实验报告](docs/experiment-report.md)：大模型使用方式、工作流、工具/提示词设计、结果与局限性。
-- [测试报告](docs/task-evaluation.md)：50 条公开任务逐项结果与 6 个代表性人工运行记录。
-- [题目原文](docs/任务1_Agent工作流构建_题目.md)：任务要求与提交材料说明。
+- [测试报告](docs/test-report.md)：自动化结果、中英文人工用例与通过标准。
 
 ## 数据来源与边界
 
