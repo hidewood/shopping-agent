@@ -7,7 +7,7 @@
 | 文档 | 作用 |
 | --- | --- |
 | [实验报告](docs/experiment-report.md) | 大模型使用方式、Agent 工作流、提示词/工具设计与结果分析。 |
-| [测试报告](docs/test-report.md) | 自动化结果、A1–A18 人工场景与复测方法。 |
+| [测试用例](docs/test-report.md) | 覆盖对话、检索、状态、异常与界面的人工测试输入及期望结果。 |
 
 ## 1. 设计目标
 
@@ -94,7 +94,7 @@ streamlit run app.py
 python -m unittest discover -s tests -v
 ```
 
-截至 2026-08-10，该命令共运行 **112 项**：**111 项通过，1 项真实 API 冒烟测试因未配置 `RUN_LIVE_API_TESTS=1` 而跳过**。测试覆盖目录接地、状态归约、路由、价格区间、主动引导、无结果和近期修复的回归场景。
+截至 2026-08-10，该命令共运行 **114 项**：**113 项通过，1 项真实 API 冒烟测试因未配置 `RUN_LIVE_API_TESTS=1` 而跳过**。测试覆盖目录接地、状态归约、路由、价格区间、主动引导、无结果和近期修复的回归场景。
 
 若已配置 API Key，可执行 50 条公开任务的真实 API 评测：
 
@@ -102,7 +102,7 @@ python -m unittest discover -s tests -v
 python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output outputs/task-evaluation.md
 ```
 
-该命令会在本地 `outputs/` 中生成可审阅记录，并核验返回商品的类型、主题、预算、严格厂商条件、可用偏好厂商与确定性排序 Trace。历史真实 API 记录为 50/50 通过；该结果的产生时间、核验范围和可复现方法见[测试报告](docs/test-report.md)。
+该命令会在本地 `outputs/` 中生成可审阅记录，并核验返回商品的类型、主题、预算、严格厂商条件、可用偏好厂商与确定性排序 Trace。历史真实 API 记录为 50/50 通过；完整的人工测试输入与期望结果见[测试用例](docs/test-report.md)。
 
 ## 6. 项目结构
 
@@ -113,7 +113,7 @@ data/products.jsonl            # 1,740 件商品目录
 data/tasks.jsonl               # 50 条公开模拟购物任务
 tests/                         # 离线回归、真实 API 冒烟与任务评测脚本
 docs/experiment-report.md      # 实验报告
-docs/test-report.md            # 测试报告
+docs/test-report.md            # 测试用例与期望结果
 docs/screenshots/              # 报告所用流程图与真实界面证据
 ```
 

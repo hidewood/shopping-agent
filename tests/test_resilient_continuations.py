@@ -146,6 +146,39 @@ class ResilientContinuationTests(unittest.TestCase):
         )
         self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
 
+    def test_multi_item_purchase_is_clarified_before_planner_execution(self) -> None:
+        """C10: a mug-and-shirt request must not fail on an unrelated model plan."""
+        self.agent.llm = FailingLLM()
+
+        result = self.agent.run_turn("我想买马克杯和T恤，预算20以内", ConversationState())
+
+        self.assertEqual(result["response_type"], "conflict")
+        self.assertIn("同时购买 mug 和 shirt", result["summary"])
+        self.assertIn("每件商品的上限", result["summary"])
+        self.assertIn("合计预算", result["summary"])
+        self.assertEqual(
+            result["conversation_state"]["pending_fields"], ["item_type", "budget_scope"]
+        )
+        self.assertTrue(
+            any(
+                step["step"] == "bundle_purchase_detection"
+                and step["item_types"] == ["mug", "shirt"]
+                for step in result["trace"]
+            )
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
+
+    def test_multiple_types_in_a_catalog_question_do_not_trigger_bundle_clarification(self) -> None:
+        """Multiple types without a purchase goal remain a read-only catalog query."""
+        self.agent.llm = TestLLM(self.repository)
+
+        result = self.agent.run_turn("mug 和 shirt 分别有什么价位？", ConversationState())
+
+        self.assertEqual(result["response_type"], "catalog_query")
+        self.assertFalse(
+            any(step["step"] == "bundle_purchase_detection" for step in result["trace"])
+        )
+
     def test_type_replacement_ignores_the_withdrawn_type_when_checking_conflicts(self) -> None:
         """“不要杯子，改成 shirt” is one replacement request, not two types."""
         state = ConversationState()

@@ -781,7 +781,9 @@ class ProductRepositoryTests(unittest.TestCase):
         result = agent.run_turn("I need a mug and a shirt.", state)
         self.assertEqual(result["response_type"], "conflict")
         self.assertIsNone(result["purchased_product_id"])
-        self.assertEqual(state.pending_fields, ["item_type"])
+        self.assertEqual(state.pending_fields, ["item_type", "budget_scope"])
+        self.assertIn("每件商品", result["summary"])
+        self.assertIn("合计预算", result["summary"])
 
     def test_explicit_new_type_starts_a_new_selection_without_keyword_override(self) -> None:
         agent = ShoppingAgent(DATA_DIR)

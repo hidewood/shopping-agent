@@ -1579,6 +1579,32 @@ class ShoppingAgent:
                 pending_fields=["item_type"],
             )
 
+        requested_types = self._mentioned_item_types(message)
+        if self._is_multi_item_purchase_request(message, requested_types):
+            question = (
+                "你这次想同时购买 "
+                + " 和 ".join(requested_types)
+                + "。当前系统会先分别处理两个商品需求：请告诉我想先看哪一类，"
+                "并说明“预算”是每件商品的上限，还是两件商品的合计预算。"
+            )
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace
+                + [
+                    {
+                        "step": "bundle_purchase_detection",
+                        "status": "clarification_required",
+                        "item_types": requested_types,
+                    }
+                ],
+                question,
+                "conflict",
+                pending_question=question,
+                pending_fields=["item_type", "budget_scope"],
+            )
+
         plan = self._explicit_open_recommendation_plan(message, previous, trace)
         if plan is None:
             plan = self._active_selection_price_refinement_plan(message, state, previous, trace)
@@ -1608,20 +1634,6 @@ class ShoppingAgent:
             error = LLMResponseError("Turn plan could not be dispatched.", error_code="invalid_model_output")
             error.workflow_trace = list(trace)
             raise error
-
-        conflicting_types = self._mentioned_item_types(message)
-        if len(conflicting_types) > 1:
-            return self._finish_turn(
-                state,
-                message,
-                None,
-                trace + [{"step": "conflict_detection", "status": "conflict", "fields": ["item_type"]}],
-                "同一轮中同时出现了 " + " 和 ".join(conflicting_types)
-                + "。这两个商品类型需要分别检索，请先选择本轮要购买的一种。",
-                "conflict",
-                pending_question="你这次想买 mug（马克杯）还是 shirt（T 恤）？",
-                pending_fields=["item_type"],
-            )
 
         if self._looks_like_missing_price(message):
             return self._finish_turn(
@@ -2454,6 +2466,26 @@ class ShoppingAgent:
             mentions_gift
             and not self._mentioned_item_types(message)
             and not self._product_ids_in_message(message)
+        )
+
+    @staticmethod
+    def _is_multi_item_purchase_request(message: str, item_types: list[str]) -> bool:
+        """Recognize a purchase request spanning multiple catalog item types.
+
+        Multiple types alone are not a conflict: a user can still ask a read-only
+        question such as “mug 和 shirt 分别有什么价位？”.  The clarification is
+        reserved for actual purchase/recommendation requests, where silently
+        choosing one type would discard part of the customer's goal.
+        """
+        if len(item_types) < 2:
+            return False
+        lower = message.casefold()
+        return bool(
+            re.search(
+                r"想买|想要|要买|购买|给我找|帮我选|推荐|我需要|需要买|\bneed\b|\bwant\b|"
+                r"\bbuy\b|\bpurchase\b|\brecommend\b|\bfind\s+me\b",
+                lower,
+            )
         )
 
     @staticmethod
