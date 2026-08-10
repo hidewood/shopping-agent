@@ -169,15 +169,50 @@ class ResilientContinuationTests(unittest.TestCase):
         self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
 
     def test_multiple_types_in_a_catalog_question_do_not_trigger_bundle_clarification(self) -> None:
-        """Multiple types without a purchase goal remain a read-only catalog query."""
-        self.agent.llm = TestLLM(self.repository)
+        """Multiple types without a purchase goal return separate verified ranges."""
+        self.agent.llm = FailingLLM()
 
         result = self.agent.run_turn("mug 和 shirt 分别有什么价位？", ConversationState())
 
         self.assertEqual(result["response_type"], "catalog_query")
+        self.assertEqual(result["catalog_data"]["kind"], "multi_type_price_range")
+        ranges = result["catalog_data"]["price_ranges"]
+        self.assertEqual([item["item_type"] for item in ranges], ["mug", "shirt"])
+        for item in ranges:
+            products = sorted(
+                self.agent._products_of_type(item["item_type"]),
+                key=lambda product: (product.price, product.product_id),
+            )
+            self.assertEqual(item["count"], len(products))
+            self.assertEqual(item["lowest"]["product_id"], products[0].product_id)
+            self.assertEqual(item["highest"]["product_id"], products[-1].product_id)
         self.assertFalse(
             any(step["step"] == "bundle_purchase_detection" for step in result["trace"])
         )
+        self.assertTrue(
+            any(step["step"] == "multi_type_price_range_query" for step in result["trace"])
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
+
+    def test_english_plural_multi_type_price_query_preserves_active_selection(self) -> None:
+        """A two-type fact question must remain read-only even during selection."""
+        state = ConversationState()
+        self.agent.llm = TestLLM(self.repository)
+        self.agent.run_turn("I want an Ocean themed mug under $20.", state)
+        before = self.agent._reduce_requirement(state).to_dict()
+
+        self.agent.llm = FailingLLM()
+        result = self.agent.run_turn("What price ranges do mugs and shirts have?", state)
+
+        self.assertEqual(result["response_type"], "catalog_query")
+        self.assertEqual(result["catalog_data"]["kind"], "multi_type_price_range")
+        self.assertEqual(
+            [item["item_type"] for item in result["catalog_data"]["price_ranges"]],
+            ["mug", "shirt"],
+        )
+        self.assertEqual(self.agent._reduce_requirement(state).to_dict(), before)
+        self.assertEqual(state.task_context.active_task, "selection")
+        self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
 
     def test_type_replacement_ignores_the_withdrawn_type_when_checking_conflicts(self) -> None:
         """“不要杯子，改成 shirt” is one replacement request, not two types."""
@@ -253,6 +288,54 @@ class ResilientContinuationTests(unittest.TestCase):
         self.assertEqual(active.price_constraint.value, 20)
         self.assertTrue(
             any(step["step"] == "active_selection_price_refinement" for step in result["trace"])
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
+
+    def test_generic_recommendation_reuses_active_selection_after_read_only_query(self) -> None:
+        """A terse English direct-pick follow-up inherits verified active constraints."""
+        state = ConversationState()
+        self.agent.llm = TestLLM(self.repository)
+        self.agent.run_turn("I want an Ocean themed mug under $20.", state)
+        catalog_result = self.agent.run_turn("How many Ocean themed mugs are there?", state)
+        self.assertEqual(catalog_result["response_type"], "catalog_query")
+
+        self.agent.llm = FailingLLM()
+        result = self.agent.run_turn("Recommend one.", state)
+
+        self.assertEqual(result["response_type"], "recommendation")
+        selected = self.repository.by_id[result["purchased_product_id"]]
+        self.assertEqual(selected.item_type, "mug")
+        self.assertIn("Ocean", selected.tags)
+        self.assertLessEqual(selected.price, 20)
+        self.assertTrue(
+            any(
+                step["step"] == "active_selection_generic_recommendation"
+                for step in result["trace"]
+            )
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
+
+    def test_chinese_generic_recommendation_reuses_active_selection_after_read_only_query(self) -> None:
+        """The same deterministic continuation supports the Chinese direct-pick form."""
+        state = ConversationState()
+        self.agent.llm = TestLLM(self.repository)
+        self.agent.run_turn("我想买 Ocean主题马克杯，预算20元以内", state)
+        catalog_result = self.agent.run_turn("Ocean主题马克杯有多少件？", state)
+        self.assertEqual(catalog_result["response_type"], "catalog_query")
+
+        self.agent.llm = FailingLLM()
+        result = self.agent.run_turn("给我推荐一个", state)
+
+        self.assertEqual(result["response_type"], "recommendation")
+        selected = self.repository.by_id[result["purchased_product_id"]]
+        self.assertEqual(selected.item_type, "mug")
+        self.assertIn("Ocean", selected.tags)
+        self.assertLessEqual(selected.price, 20)
+        self.assertTrue(
+            any(
+                step["step"] == "active_selection_generic_recommendation"
+                for step in result["trace"]
+            )
         )
         self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
 

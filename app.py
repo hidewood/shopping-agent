@@ -268,6 +268,22 @@ def show_catalog_answer(agent: Agent, result: dict[str, Any]) -> None:
                     product_card(agent.repository.by_id[product_data["product_id"]], title=label)
         return
 
+    if kind == "multi_type_price_range":
+        rows = [
+            {
+                "商品类型": item["item_type"],
+                "商品数量": item["count"],
+                "最低价": f'${item["lowest"]["price"]:.2f}',
+                "最低价商品": item["lowest"]["product_id"],
+                "最高价": f'${item["highest"]["price"]:.2f}',
+                "最高价商品": item["highest"]["product_id"],
+            }
+            for item in data.get("price_ranges", [])
+        ]
+        if rows:
+            st.dataframe(rows, hide_index=True, width="stretch")
+        return
+
     if kind == "exploration":
         products = data.get("products", [])
         if products:

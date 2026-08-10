@@ -1605,9 +1605,18 @@ class ShoppingAgent:
                 pending_fields=["item_type", "budget_scope"],
             )
 
+        if self._is_multi_type_price_range_query(message, requested_types):
+            return self._handle_multi_type_price_range_query(
+                state, message, requested_types, trace
+            )
+
         plan = self._explicit_open_recommendation_plan(message, previous, trace)
         if plan is None:
             plan = self._active_selection_price_refinement_plan(message, state, previous, trace)
+        if plan is None:
+            plan = self._active_selection_generic_recommendation_plan(
+                message, state, previous, trace
+            )
         if plan is None:
             plan = self._create_turn_plan(message, state, previous, trace)
         plan = self._enforce_pending_price_refinement(plan, message, state, previous, trace)
@@ -2006,6 +2015,75 @@ class ShoppingAgent:
             update_shopping_state=False,
             catalog_data=data,
             guidance_products=products,
+        )
+
+    def _handle_multi_type_price_range_query(
+        self,
+        state: ConversationState,
+        message: str,
+        item_types: list[str],
+        trace: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Answer a read-only price-range question for each named catalog type.
+
+        A request such as ``mug 和 shirt 分别有什么价位？`` contains two
+        independent scopes rather than one impossible item type.  Keep this
+        deterministic and deliberately narrow: it provides only the verified
+        per-type price facts, does not enter the purchase-combination workflow,
+        and does not mutate an in-progress selection.
+        """
+        ranges: list[dict[str, Any]] = []
+        summaries: list[str] = []
+        for item_type in item_types:
+            products = sorted(
+                self._products_of_type(item_type),
+                key=lambda product: (product.price, product.product_id),
+            )
+            if not products:
+                continue
+            lowest = products[0]
+            highest = products[-1]
+            ranges.append(
+                {
+                    "item_type": item_type,
+                    "count": len(products),
+                    "lowest": lowest.to_dict(),
+                    "highest": highest.to_dict(),
+                }
+            )
+            summaries.append(
+                f"{item_type} 共 {len(products)} 件，价格范围为 ${lowest.price:.2f} 至 ${highest.price:.2f}"
+            )
+
+        trace.append(
+            {
+                "step": "multi_type_price_range_query",
+                "status": "completed",
+                "item_types": list(item_types),
+                "ranges": [
+                    {
+                        "item_type": item["item_type"],
+                        "count": item["count"],
+                        "lowest_product_id": item["lowest"]["product_id"],
+                        "highest_product_id": item["highest"]["product_id"],
+                    }
+                    for item in ranges
+                ],
+            }
+        )
+        return self._finish_turn(
+            state,
+            message,
+            None,
+            trace,
+            "本地商品库中：" + "；".join(summaries) + "。",
+            "catalog_query",
+            update_shopping_state=False,
+            catalog_data={
+                "kind": "multi_type_price_range",
+                "operations": ["price_range"],
+                "price_ranges": ranges,
+            },
         )
 
     def _handle_product_detail(
@@ -2423,7 +2501,7 @@ class ShoppingAgent:
         mentioned = [
             item_type
             for item_type in known_types
-            if re.search(rf"\b{re.escape(item_type.casefold())}\b", lower)
+            if re.search(rf"\b{re.escape(item_type.casefold())}s?\b", lower)
         ]
         for canonical, aliases in CATALOG_ITEM_TYPE_ALIASES.items():
             if canonical in known_types and any(alias.casefold() in lower for alias in aliases):
@@ -2484,6 +2562,25 @@ class ShoppingAgent:
             re.search(
                 r"想买|想要|要买|购买|给我找|帮我选|推荐|我需要|需要买|\bneed\b|\bwant\b|"
                 r"\bbuy\b|\bpurchase\b|\brecommend\b|\bfind\s+me\b",
+                lower,
+            )
+        )
+
+    @staticmethod
+    def _is_multi_type_price_range_query(message: str, item_types: list[str]) -> bool:
+        """Recognize a fact question requesting prices for several known types.
+
+        The purchase branch runs first, so a message containing a buying or
+        recommendation verb is still handled as a combination-purchase
+        clarification.  This branch is only for read-only price facts.
+        """
+        if len(item_types) < 2:
+            return False
+        lower = message.casefold()
+        return bool(
+            re.search(
+                r"分别|各自|价位|价格范围|多少钱|价格|"
+                r"\bprice(?:\s+ranges?)?\b|\bprices\b|\bhow\s+much\b",
                 lower,
             )
         )
@@ -3013,6 +3110,71 @@ class ShoppingAgent:
             selection_mode="criteria",
             action=None,
             goal_evidence=[],
+        )
+
+    def _active_selection_generic_recommendation_plan(
+        self,
+        message: str,
+        state: ConversationState,
+        previous: ShoppingRequirement,
+        trace: list[dict[str, Any]],
+    ) -> TurnPlan | None:
+        """Reuse a live selection for a deliberately generic direct-pick follow-up.
+
+        Read-only catalog questions retain the active requirement by design.  A
+        short follow-up such as ``给我推荐一个`` or ``Recommend one.`` is an
+        explicit permission to choose from that retained scope, not a fresh
+        type-agnostic request.  The recognizer is intentionally full-message
+        based, so a new budget, type, theme, manufacturer, product ID, or other
+        substantive condition continues through the normal planner path.
+        """
+        if (
+            state.task_context.active_task != "selection"
+            or not previous.item_type.raw_value
+            or self._product_ids_in_message(message)
+            or not self._is_generic_direct_pick_follow_up(message)
+        ):
+            return None
+
+        trace.append(
+            {
+                "step": "active_selection_generic_recommendation",
+                "status": "enforced",
+                "preserved_requirement": previous.to_dict(),
+            }
+        )
+        return TurnPlan(
+            goal="selection",
+            target="catalog",
+            customer_reply=None,
+            requirement=ShoppingRequirement(),
+            catalog_operations=[],
+            state_action="merge",
+            # The user has now explicitly asked us to make a default choice;
+            # it must not fall back to the type-only exploration stage.
+            selection_mode="explicitly_open",
+            action=None,
+            goal_evidence=[],
+        )
+
+    @staticmethod
+    def _is_generic_direct_pick_follow_up(message: str) -> bool:
+        """Match only terse, condition-free requests to choose one product."""
+        compact = re.sub(r"[\s,，。.!！?？]+", "", message.casefold())
+        chinese_patterns = (
+            r"(?:那就|那|就)?(?:给我|帮我)?(?:推荐|选)(?:一个|一件)?(?:吧)?",
+            r"(?:继续)?(?:推荐|选)(?:一个|一件)?(?:吧)?",
+        )
+        if any(re.fullmatch(pattern, compact) for pattern in chinese_patterns):
+            return True
+
+        english = re.sub(r"[,.!?]+", "", message.casefold()).strip()
+        return bool(
+            re.fullmatch(
+                r"(?:please\s+)?(?:recommend|pick|choose)\s+(?:me\s+)?one(?:\s+please)?"
+                r"|what\s+do\s+you\s+recommend",
+                english,
+            )
         )
 
     @staticmethod
