@@ -1249,7 +1249,9 @@ Use goal=selection and target=catalog only when the user explicitly asks to choo
 clearly answers a pending selection question. Set customer_reply to null, catalog_operations to [],
 and provide requirement. Use state_action="merge" only to refine the current selection; use
 state_action="replace" when the latest request clearly starts a new selection, especially when it names a
-different product type. selection_mode is "criteria" when the user specifies selection criteria, or
+different product type. If the latest message says it no longer wants one product type and switches to
+another (for example “不要杯子，改成 shirt” or “not a mug, switch to a shirt”), retain only the new
+type and use state_action="replace". selection_mode is "criteria" when the user specifies selection criteria, or
 "explicitly_open" only when they clearly permit an unconstrained/default choice.
 goal_evidence must quote the exact user substring that authorizes selection; when continuing a pending
 selection question, use an empty array.
@@ -1528,7 +1530,29 @@ class ShoppingAgent:
             )
 
         previous = self._reduce_requirement(state)
-        plan = self._create_turn_plan(message, state, previous, trace)
+        if self._is_type_agnostic_gift_request(message):
+            question = "送礼的话，你想看 mug（马克杯）还是 shirt（T 恤）？也可以补充预算或喜欢的主题。"
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace + [
+                    {
+                        "step": "deterministic_clarification",
+                        "status": "requested",
+                        "reason": "gift_without_item_type",
+                        "fields": ["item_type"],
+                    }
+                ],
+                question,
+                "clarification",
+                pending_question=question,
+                pending_fields=["item_type"],
+            )
+
+        plan = self._active_selection_price_refinement_plan(message, state, previous, trace)
+        if plan is None:
+            plan = self._create_turn_plan(message, state, previous, trace)
         plan = self._enforce_pending_price_refinement(
             plan, message, state, previous, trace
         )
@@ -2116,7 +2140,16 @@ class ShoppingAgent:
         if parsed.manufacturer.raw_value:
             operation = "replace" if base.manufacturer.raw_value else "set"
             add("manufacturer", operation, asdict(parsed.manufacturer))
-        if parsed.price_constraint.has_value():
+        clears_existing_price = (
+            base.price_constraint.has_value()
+            and self._explicitly_clears_price_constraint(message)
+            and not self._price_constraint_from_instruction(message).has_value()
+        )
+        if clears_existing_price:
+            # The direct customer instruction wins over a planner that echoes a
+            # historical price constraint from the conversation context.
+            add("price_constraint", "clear", {})
+        elif parsed.price_constraint.has_value():
             operation = "replace" if base.price_constraint.has_value() else "set"
             add("price_constraint", operation, asdict(parsed.price_constraint))
 
@@ -2174,6 +2207,8 @@ class ShoppingAgent:
                 requirement.manufacturer = CatalogConstraint.from_value(value)
             elif field_name == "price_constraint" and operation in {"set", "replace"}:
                 requirement.price_constraint = PriceConstraint.from_value(value)
+            elif field_name == "price_constraint" and operation == "clear":
+                requirement.price_constraint = PriceConstraint()
             elif field_name == "concept" and operation == "set":
                 concept = Concept.from_dict(value)
                 if concept and _normalize(concept.raw_value) not in {
@@ -2185,6 +2220,32 @@ class ShoppingAgent:
                 concepts = [item for item in concepts if _normalize(item.raw_value) != raw_value]
         requirement.concepts = concepts
         return requirement
+
+    @staticmethod
+    def _explicitly_clears_price_constraint(message: str) -> bool:
+        """Recognize a direct withdrawal of an earlier budget constraint.
+
+        This is intentionally narrow: an explicit new amount is handled as a
+        replacement above, while only a clear cancellation removes the existing
+        price event from the replayed selection state.
+        """
+        normalized = _normalize(message)
+        cancellation_phrases = (
+            "不用预算限制",
+            "不设预算",
+            "不限预算",
+            "预算不限",
+            "没有预算限制",
+            "无预算限制",
+            "预算无所谓",
+            "不限制价格",
+            "no budget limit",
+            "without a budget limit",
+            "no price limit",
+            "without a price limit",
+            "any price",
+        )
+        return any(phrase in normalized for phrase in cancellation_phrases)
 
     def _finish_turn(
         self,
@@ -2326,7 +2387,45 @@ class ShoppingAgent:
         for canonical, aliases in CATALOG_ITEM_TYPE_ALIASES.items():
             if canonical in known_types and any(alias.casefold() in lower for alias in aliases):
                 mentioned.append(canonical)
-        return _deduplicate(mentioned)
+        negated_types = {
+            canonical
+            for canonical in known_types
+            if self._has_negated_item_type_mention(lower, canonical)
+        }
+        return [item_type for item_type in _deduplicate(mentioned) if item_type not in negated_types]
+
+    @staticmethod
+    def _has_negated_item_type_mention(message: str, item_type: str) -> bool:
+        """Recognize a withdrawn type in a natural-language replacement request.
+
+        This deliberately covers only direct local patterns such as “不要杯子，改成
+        shirt” and “not a mug, switch to a shirt”.  It is used solely for same-turn
+        conflict detection; the model still extracts the positive replacement and
+        Python still verifies the state transition before retrieval.
+        """
+        aliases = (item_type, *CATALOG_ITEM_TYPE_ALIASES.get(item_type, ()))
+        chinese_negation = r"(?:不要|不想要|不需要|不再要|别要|别买|不买|不是)"
+        english_negation = r"(?:not|no\s+longer|without|instead\s+of|don't\s+want|do\s+not\s+want)"
+        for alias in aliases:
+            escaped_alias = re.escape(alias.casefold())
+            if re.search(rf"{chinese_negation}\s*{escaped_alias}", message):
+                return True
+            if re.search(
+                rf"{english_negation}\s+(?:an?\s+|the\s+)?{escaped_alias}\b",
+                message,
+            ):
+                return True
+        return False
+
+    def _is_type_agnostic_gift_request(self, message: str) -> bool:
+        """Return whether a gift request needs exactly one deterministic type question."""
+        lower = message.casefold()
+        mentions_gift = bool(re.search(r"礼物|送礼|送人|\bgifts?\b|\bpresents?\b", lower))
+        return (
+            mentions_gift
+            and not self._mentioned_item_types(message)
+            and not self._product_ids_in_message(message)
+        )
 
     def _canonical_item_type(self, constraint: CatalogConstraint) -> str | None:
         """Resolve a type for state comparison while retaining the original user wording."""
@@ -2721,6 +2820,56 @@ class ShoppingAgent:
             target="catalog",
             customer_reply=None,
             requirement=ShoppingRequirement(price_constraint=resolved),
+            catalog_operations=[],
+            state_action="merge",
+            selection_mode="criteria",
+            action=None,
+            goal_evidence=[],
+        )
+
+    def _active_selection_price_refinement_plan(
+        self,
+        message: str,
+        state: ConversationState,
+        previous: ShoppingRequirement,
+        trace: list[dict[str, Any]],
+    ) -> TurnPlan | None:
+        """Safely continue an explicit recommendation request after a read-only query.
+
+        Catalog questions preserve a live selection context.  If the next turn says
+        “recommend one under $20”, the current item type and theme remain explicit
+        state, while the stated budget is an unambiguous hard refinement.  Routing
+        this narrow shape before the model prevents a malformed planner response
+        from turning a valid follow-up into a service error.
+        """
+        price_constraint = self._price_constraint_from_instruction(message)
+        has_recommendation_request = bool(
+            re.search(r"推荐|帮我选|给我找|想买|要买|recommend|find\s+me", message.casefold())
+        )
+        can_continue = (
+            state.task_context.active_task == "selection"
+            and bool(previous.item_type.raw_value)
+            and price_constraint.has_value()
+            and has_recommendation_request
+            and not self._mentioned_item_types(message)
+            and not self._product_ids_in_message(message)
+        )
+        if not can_continue:
+            return None
+
+        trace.append(
+            {
+                "step": "active_selection_price_refinement",
+                "status": "enforced",
+                "price_constraint": price_constraint.to_dict(),
+                "preserved_item_type": previous.item_type.raw_value,
+            }
+        )
+        return TurnPlan(
+            goal="selection",
+            target="catalog",
+            customer_reply=None,
+            requirement=ShoppingRequirement(price_constraint=price_constraint),
             catalog_operations=[],
             state_action="merge",
             selection_mode="criteria",

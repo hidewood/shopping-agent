@@ -141,6 +141,29 @@ class PriceRangeTests(unittest.TestCase):
         selected = self.repository.by_id[second["purchased_product_id"]]
         self.assertTrue(12 <= selected.price <= 18)
 
+    def test_explicit_budget_removal_clears_an_earlier_price_constraint(self) -> None:
+        """C6: withdrawing a budget must remove, rather than retain, its event."""
+        state = ConversationState()
+        self.agent.llm = TestLLM(self.repository)
+        self.agent.run_turn("Ocean mug under $20.", state)
+
+        result = self.agent.run_turn("不用预算限制了，优先 Bayer-and-Sons。", state)
+
+        self.assertEqual(result["response_type"], "recommendation")
+        active = self.agent._reduce_requirement(state)
+        self.assertFalse(active.price_constraint.has_value())
+        self.assertEqual(active.manufacturer.catalog_hint, "Bayer-and-Sons")
+        price_change = next(
+            change
+            for step in result["trace"]
+            if step["step"] == "constraint_update"
+            for change in step["changes"]
+            if change["field"] == "price_constraint"
+        )
+        self.assertEqual(price_change["operation"], "clear")
+        grounded = next(step for step in result["trace"] if step["step"] == "catalog_grounding")
+        self.assertIsNone(grounded["grounded_requirements"]["max_price"])
+
     def test_single_chinese_lower_and_upper_bounds_remain_supported(self) -> None:
         lower = self.agent._price_constraint_from_instruction("10 元以上")
         upper = self.agent._price_constraint_from_instruction("20 元以下")
