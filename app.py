@@ -103,16 +103,21 @@ def readable_requirements(grounded: dict[str, Any]) -> list[str]:
         upper = "≤" if grounded.get("max_price_inclusive", True) else "<"
         items.append(
             "预算："
-            f"${grounded['min_price']:.2f} {lower} 价格 {upper} ${grounded['max_price']:.2f}"
+            # ``st.caption`` parses Markdown.  A pair of dollar signs would be
+            # interpreted as inline LaTeX and render the range in a mismatched
+            # math font, so use an explicit currency label here.
+            f"USD {grounded['min_price']:.2f} {lower} 价格 {upper} USD {grounded['max_price']:.2f}"
         )
     elif grounded.get("min_price") is not None:
         operator = "≥" if grounded.get("min_price_inclusive", True) else ">"
-        items.append(f"预算：价格 {operator} ${grounded['min_price']:.2f}")
+        items.append(f"预算：价格 {operator} USD {grounded['min_price']:.2f}")
     elif grounded.get("max_price") is not None:
         operator = "≤" if grounded.get("max_price_inclusive", True) else "<"
-        items.append(f"预算：价格 {operator} ${grounded['max_price']:.2f}")
+        items.append(f"预算：价格 {operator} USD {grounded['max_price']:.2f}")
     elif grounded.get("price_value") is not None:
-        items.append(f"预算：价格 {grounded.get('price_operator')} ${grounded['price_value']:.2f}")
+        items.append(
+            f"预算：价格 {grounded.get('price_operator')} USD {grounded['price_value']:.2f}"
+        )
     required_groups = grounded.get("required_tag_groups") or [
         [tag] for tag in grounded.get("required_tags", [])
     ]

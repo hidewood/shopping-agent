@@ -960,15 +960,27 @@ class ProductRepository:
     def tags_in_text(self, text: str) -> list[str]:
         """Match English catalog tags plus an explicit, verified Chinese alias subset."""
         tokens = _meaningful_tokens(text)
+        lower_text = text.casefold()
         matched = [
             tag
             for tag in self._catalog["tags"]
             if (tag_tokens := _meaningful_tokens(tag)) and tag_tokens.issubset(tokens)
         ]
+        # English tags can be immediately followed by Chinese descriptors, e.g.
+        # ``Ocean主题``.  Normal tokenisation keeps that as one CJK-containing
+        # token (``ocean主题``), so it would otherwise miss the verified ``Ocean``
+        # tag.  The ASCII boundaries avoid partial matches such as ``oceanic``.
+        for tag in self._catalog["tags"]:
+            normalized_tag = tag.casefold()
+            if not re.fullmatch(r"[a-z0-9]+(?: [a-z0-9]+)*", normalized_tag):
+                continue
+            tag_pattern = re.escape(normalized_tag).replace(r"\ ", r"\s+")
+            if re.search(rf"(?<![a-z0-9]){tag_pattern}(?![a-z0-9])", lower_text):
+                matched.append(tag)
         for canonical, aliases in CATALOG_TAG_ALIASES.items():
             if canonical not in self._catalog["tags"]:
                 continue
-            if any(alias.casefold() in text.casefold() for alias in aliases):
+            if any(alias.casefold() in lower_text for alias in aliases):
                 matched.append(canonical)
         return _deduplicate(matched)
 
@@ -1530,6 +1542,23 @@ class ShoppingAgent:
             )
 
         previous = self._reduce_requirement(state)
+        if self._is_capability_overview_request(message):
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace
+                + [
+                    {
+                        "step": "deterministic_capability_overview",
+                        "status": "completed",
+                    }
+                ],
+                "我可以帮你查询商品、比较商品，并根据预算、主题或厂商条件推荐商品。"
+                "当前不支持下单、支付或取消订单。",
+                "chat",
+                update_shopping_state=False,
+            )
         if self._is_type_agnostic_gift_request(message):
             question = "送礼的话，你想看 mug（马克杯）还是 shirt（T 恤）？也可以补充预算或喜欢的主题。"
             return self._finish_turn(
@@ -1550,12 +1579,12 @@ class ShoppingAgent:
                 pending_fields=["item_type"],
             )
 
-        plan = self._active_selection_price_refinement_plan(message, state, previous, trace)
+        plan = self._explicit_open_recommendation_plan(message, previous, trace)
+        if plan is None:
+            plan = self._active_selection_price_refinement_plan(message, state, previous, trace)
         if plan is None:
             plan = self._create_turn_plan(message, state, previous, trace)
-        plan = self._enforce_pending_price_refinement(
-            plan, message, state, previous, trace
-        )
+        plan = self._enforce_pending_price_refinement(plan, message, state, previous, trace)
         if plan.goal == "chat":
             return self._finish_turn(
                 state,
@@ -2427,6 +2456,83 @@ class ShoppingAgent:
             and not self._product_ids_in_message(message)
         )
 
+    @staticmethod
+    def _is_capability_overview_request(message: str) -> bool:
+        """Recognize a broad capability question that should not rely on chat prose.
+
+        The answer describes product discovery only.  It must never imply that
+        an unsupported order or payment action is available.
+        """
+        lower = message.casefold()
+        return bool(
+            re.search(
+                r"能(?:做|帮.*做)什么|可以(?:做|帮.*做)什么|有什么(?:功能|帮助)|"
+                r"\bwhat\s+can\s+you\s+(?:do|help(?:\s+me)?\s+with)\b|"
+                r"\bhow\s+can\s+you\s+help\b",
+                lower,
+            )
+        )
+
+    def _explicit_open_recommendation_plan(
+        self,
+        message: str,
+        previous: ShoppingRequirement,
+        trace: list[dict[str, Any]],
+    ) -> TurnPlan | None:
+        """Route an explicit default-choice request without model ambiguity.
+
+        This is intentionally narrow: it applies only when the customer names
+        exactly one product type, asks for a direct pick, and explicitly leaves
+        budget/style unconstrained.  Other natural-language recommendation turns
+        continue through the planner as before.
+        """
+        lower = message.casefold()
+        mentioned_types = self._mentioned_item_types(message)
+        direct_pick = bool(
+            re.search(
+                r"直接(?:给我)?(?:推荐|选)(?:一个|一件)?|(?:直接|马上)\s*(?:帮我)?(?:推荐|选)|"
+                r"\bdirectly\s+(?:recommend|pick)\b|"
+                r"\brecommend\s+(?:me\s+)?(?:one|a)\b|\bpick\s+(?:one|a)\b",
+                lower,
+            )
+        )
+        explicitly_open = bool(
+            re.search(
+                r"不限(?:预算|价格|风格|主题|品牌|厂商)|不设(?:预算|价格)|无(?:预算|偏好|风格)|"
+                r"\b(?:no|without)\s+(?:a\s+)?(?:budget|price|style|theme|preference)s?\b|"
+                r"\bany\s+(?:budget|price|style|theme|preference)\b",
+                lower,
+            )
+        )
+        if len(mentioned_types) != 1 or not direct_pick or not explicitly_open:
+            return None
+
+        item_type = mentioned_types[0]
+        previous_item_type = self._canonical_item_type(previous.item_type)
+        state_action = "replace" if previous_item_type and previous_item_type != item_type else "merge"
+        trace.append(
+            {
+                "step": "explicit_open_recommendation",
+                "status": "enforced",
+                "item_type": item_type,
+                "state_action": state_action,
+            }
+        )
+        return TurnPlan(
+            goal="selection",
+            target="catalog",
+            requirement=ShoppingRequirement(
+                item_type=CatalogConstraint(
+                    raw_value=item_type,
+                    constraint_strength="hard",
+                    catalog_hint=item_type,
+                )
+            ),
+            state_action=state_action,
+            selection_mode="explicitly_open",
+            goal_evidence=[],
+        )
+
     def _canonical_item_type(self, constraint: CatalogConstraint) -> str | None:
         """Resolve a type for state comparison while retaining the original user wording."""
         allowed = self.repository.catalog()["item_types"]
@@ -3107,7 +3213,6 @@ class ShoppingAgent:
     @staticmethod
     def _relaxation_advice(alternatives: list[dict[str, Any]]) -> str:
         """State which single condition blocked the search, with the real near miss."""
-        labels = {"price": "预算", "manufacturer": "厂商", "tags": "主题"}
         parts: list[str] = []
         for item in alternatives:
             constraint = item["relaxed_constraint"]
@@ -3115,23 +3220,26 @@ class ShoppingAgent:
             gap = item["gap"]
             product = f"{closest['name']}（{closest['product_id']}，${closest['price']:.2f}）"
             if constraint == "price":
+                difference = float(gap.get("difference") or 0)
+                if difference:
+                    gap_text = f"与原预算相差 ${difference:.2f}"
+                else:
+                    gap_text = "需要放宽原价格边界才可纳入"
                 parts.append(
-                    f"若放宽价格条件（{gap['requested']}），可选 {product}"
-                    f"，它满足其余全部条件"
+                    f"若取消预算限制，最接近的是 {product}（{gap_text}），"
+                    f"它满足其余全部条件；取消预算限制后共有 {item['match_count']} 件可选"
                 )
             elif constraint == "manufacturer":
                 parts.append(
                     f"若不限定厂商 {gap['requested']}，可选 {product}"
-                    f"，厂商为 {gap['actual']}"
+                    f"，厂商为 {gap['actual']}；不限定该厂商后共有 {item['match_count']} 件可选"
                 )
             else:
                 parts.append(
-                    f"若不限定主题，可选 {product}，其标签为 {'、'.join(gap['actual'])}"
+                    f"若不限定主题，可选 {product}，其标签为 {'、'.join(gap['actual'])}；"
+                    f"不限定主题后共有 {item['match_count']} 件可选"
                 )
-        joined = "；".join(parts)
-        others = sum(item["match_count"] for item in alternatives) - len(alternatives)
-        tail = f"。放宽后另有 {others} 件可选。" if others > 0 else "。"
-        return f"最接近的结果是：{joined}{tail}"
+        return "最接近的结果是：" + "；".join(parts) + "。"
 
     @staticmethod
     def _looks_like_missing_price(instruction: str) -> bool:

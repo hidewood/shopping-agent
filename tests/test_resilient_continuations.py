@@ -44,6 +44,108 @@ class ResilientContinuationTests(unittest.TestCase):
         self.repository = ProductRepository(DATA_DIR)
         self.agent = ShoppingAgent(DATA_DIR)
 
+    def test_capability_overview_never_claims_unsupported_transactions(self) -> None:
+        """A1: a broad greeting must describe the actual capability boundary."""
+        self.agent.llm = FailingLLM()
+
+        result = self.agent.run_turn("你好，你能做什么？", ConversationState())
+
+        self.assertEqual(result["response_type"], "chat")
+        self.assertIn("查询商品、比较商品", result["summary"])
+        self.assertIn("不支持下单、支付或取消订单", result["summary"])
+        self.assertTrue(
+            any(step["step"] == "deterministic_capability_overview" for step in result["trace"])
+        )
+        self.assertFalse(any(step["step"] == "model_service" for step in result["trace"]))
+
+    def test_chinese_english_tag_followed_by_theme_is_a_hard_constraint(self) -> None:
+        """A2: ``Ocean主题`` must not depend on the default ranking coincidentally."""
+        state = ConversationState()
+        self.agent.llm = StaticPlanLLM(
+            selection_plan(
+                {
+                    "item_type": {
+                        "raw_value": "mug",
+                        "constraint_strength": "hard",
+                        "catalog_hint": "mug",
+                    },
+                    "manufacturer": None,
+                    "price_constraint": None,
+                    "concepts": [],
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                }
+            )
+        )
+        self.agent.run_turn("我想买一个马克杯", state)
+
+        self.agent.llm = StaticPlanLLM(
+            selection_plan(
+                {
+                    "item_type": None,
+                    "manufacturer": None,
+                    "price_constraint": {"operator": "<=", "value": 20},
+                    "concepts": [],
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                }
+            )
+        )
+        result = self.agent.run_turn("Ocean主题，预算20元以内", state)
+
+        self.assertEqual(result["response_type"], "recommendation")
+        grounded = next(step for step in result["trace"] if step["step"] == "catalog_grounding")
+        self.assertEqual(grounded["grounded_requirements"]["required_tags"], ["Ocean"])
+        selected = self.repository.by_id[result["purchased_product_id"]]
+        self.assertIn("Ocean", selected.tags)
+
+    def test_no_match_price_advice_states_the_actual_relaxation(self) -> None:
+        """A15: a nearest price alternative cannot repeat the rejected budget."""
+        self.agent.llm = StaticPlanLLM(
+            selection_plan(
+                {
+                    "item_type": {
+                        "raw_value": "mug",
+                        "constraint_strength": "hard",
+                        "catalog_hint": "mug",
+                    },
+                    "manufacturer": None,
+                    "price_constraint": {"operator": "<=", "value": 8},
+                    "concepts": [
+                        {
+                            "raw_value": "Ocean",
+                            "kind": "theme",
+                            "constraint_strength": "hard",
+                            "catalog_tag_hints": ["Ocean"],
+                        }
+                    ],
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                }
+            )
+        )
+
+        result = self.agent.run_turn("我想要 Ocean主题马克杯，预算8元以内", ConversationState())
+
+        self.assertEqual(result["response_type"], "no_match")
+        self.assertIn("取消预算限制", result["summary"])
+        self.assertIn("与原预算相差 $1.99", result["summary"])
+        self.assertNotIn("若放宽价格条件（", result["summary"])
+
+    def test_explicit_open_request_recommends_without_waiting_for_the_planner(self) -> None:
+        """A17: an explicit request for any shirt should skip type-only exploration."""
+        self.agent.llm = FailingLLM()
+
+        result = self.agent.run_turn("我想买一件T恤，不限预算和风格，直接推荐一个", ConversationState())
+
+        self.assertEqual(result["response_type"], "recommendation")
+        selected = self.repository.by_id[result["purchased_product_id"]]
+        self.assertEqual(selected.item_type, "shirt")
+        self.assertTrue(
+            any(step["step"] == "explicit_open_recommendation" for step in result["trace"])
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
+
     def test_type_replacement_ignores_the_withdrawn_type_when_checking_conflicts(self) -> None:
         """“不要杯子，改成 shirt” is one replacement request, not two types."""
         state = ConversationState()
