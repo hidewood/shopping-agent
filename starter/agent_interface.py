@@ -474,6 +474,30 @@ class TaskContext:
 
 
 @dataclass
+class BundlePurchaseContext:
+    """Temporary slots for a multi-item request before one item can be retrieved.
+
+    A normal ``ShoppingRequirement`` represents a single product scope.  A
+    simultaneous mug-and-shirt request remains ambiguous until the customer has
+    selected the first product type and explained whether a stated budget applies
+    to each item or to the combined purchase.
+    """
+
+    item_types: list[str] = field(default_factory=list)
+    selected_item_type: str | None = None
+    budget_scope: str | None = None  # per_item | combined
+    original_price_constraint: PriceConstraint = field(default_factory=PriceConstraint)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "item_types": list(self.item_types),
+            "selected_item_type": self.selected_item_type,
+            "budget_scope": self.budget_scope,
+            "original_price_constraint": self.original_price_constraint.to_dict(),
+        }
+
+
+@dataclass
 class ConversationState:
     """Serializable transcript plus independent selection and catalog-query contexts."""
 
@@ -484,6 +508,7 @@ class ConversationState:
     status: str = "collecting"
     turn_count: int = 0
     last_catalog_context: dict[str, Any] | None = None
+    bundle_context: BundlePurchaseContext | None = None
     task_context: TaskContext = field(default_factory=TaskContext)
 
     def add_event(self, event_type: str, payload: dict[str, Any]) -> None:
@@ -498,6 +523,7 @@ class ConversationState:
             "status": self.status,
             "turn_count": self.turn_count,
             "last_catalog_context": dict(self.last_catalog_context or {}),
+            "bundle_context": self.bundle_context.to_dict() if self.bundle_context else None,
             "task_context": self.task_context.to_dict(),
         }
 
@@ -1579,8 +1605,20 @@ class ShoppingAgent:
                 pending_fields=["item_type"],
             )
 
+        bundle_plan, bundle_result = self._continue_bundle_purchase_clarification(
+            state, message, trace
+        )
+        if bundle_result is not None:
+            return bundle_result
+
         requested_types = self._mentioned_item_types(message)
         if self._is_multi_item_purchase_request(message, requested_types):
+            state.bundle_context = BundlePurchaseContext(
+                item_types=requested_types,
+                original_price_constraint=self._price_constraint_from_instruction(message),
+            )
+            state.task_context.active_task = "selection"
+            state.task_context.selection_phase = "collecting"
             question = (
                 "你这次想同时购买 "
                 + " 和 ".join(requested_types)
@@ -1597,7 +1635,13 @@ class ShoppingAgent:
                         "step": "bundle_purchase_detection",
                         "status": "clarification_required",
                         "item_types": requested_types,
-                    }
+                    },
+                    {
+                        "step": "task_state",
+                        "status": "updated",
+                        "task": "selection",
+                        "phase": "collecting",
+                    },
                 ],
                 question,
                 "conflict",
@@ -1610,7 +1654,7 @@ class ShoppingAgent:
                 state, message, requested_types, trace
             )
 
-        plan = self._explicit_open_recommendation_plan(message, previous, trace)
+        plan = bundle_plan or self._explicit_open_recommendation_plan(message, previous, trace)
         if plan is None:
             plan = self._active_selection_price_refinement_plan(message, state, previous, trace)
         if plan is None:
@@ -2564,6 +2608,225 @@ class ShoppingAgent:
                 r"\bbuy\b|\bpurchase\b|\brecommend\b|\bfind\s+me\b",
                 lower,
             )
+        )
+
+    @staticmethod
+    def _bundle_budget_scope(message: str) -> str | None:
+        """Return an explicitly stated scope for a multi-item budget."""
+        lower = message.casefold()
+        if any(
+            phrase in lower
+            for phrase in (
+                "每件",
+                "每个",
+                "单件",
+                "各自",
+                "分别",
+                "each item",
+                "per item",
+                "per product",
+                "individual",
+            )
+        ):
+            return "per_item"
+        if any(
+            phrase in lower
+            for phrase in (
+                "合计",
+                "总预算",
+                "总共",
+                "一共",
+                "combined",
+                "total budget",
+                "altogether",
+            )
+        ):
+            return "combined"
+        return None
+
+    def _bundle_selection_plan(
+        self,
+        state: ConversationState,
+        context: BundlePurchaseContext,
+        price_constraint: PriceConstraint,
+        trace: list[dict[str, Any]],
+        *,
+        source: str,
+    ) -> TurnPlan:
+        """Start the selected single-product subtask after bundle slots are complete."""
+        item_type = context.selected_item_type
+        if item_type is None:
+            raise ValueError("Bundle subtask requires a selected item type.")
+        trace.append(
+            {
+                "step": "bundle_purchase_subtask",
+                "status": "selection_ready",
+                "item_type": item_type,
+                "budget_scope": context.budget_scope,
+                "price_constraint": price_constraint.to_dict(),
+                "source": source,
+            }
+        )
+        # A bundle begins a new, explicitly selected subtask.  Do not leak an
+        # earlier single-product requirement into it after the slots are filled.
+        state.bundle_context = None
+        return TurnPlan(
+            goal="selection",
+            target="catalog",
+            customer_reply=None,
+            requirement=ShoppingRequirement(
+                item_type=CatalogConstraint(
+                    raw_value=item_type,
+                    constraint_strength="hard",
+                    catalog_hint=item_type,
+                ),
+                price_constraint=PriceConstraint.from_value(price_constraint.to_dict()),
+            ),
+            catalog_operations=[],
+            state_action="replace",
+            selection_mode="criteria",
+            action=None,
+            goal_evidence=[],
+        )
+
+    def _continue_bundle_purchase_clarification(
+        self,
+        state: ConversationState,
+        message: str,
+        trace: list[dict[str, Any]],
+    ) -> tuple[TurnPlan | None, dict[str, Any] | None]:
+        """Require a type and a budget scope before a bundle can retrieve products."""
+        context = state.bundle_context
+        bundle_fields = {"item_type", "budget_scope", "item_price_constraint"}
+        if context is None or not bundle_fields.intersection(state.pending_fields):
+            return None, None
+
+        mentioned_types = [
+            item_type
+            for item_type in self._mentioned_item_types(message)
+            if item_type in context.item_types
+        ]
+        if len(mentioned_types) == 1:
+            context.selected_item_type = mentioned_types[0]
+        scope = self._bundle_budget_scope(message)
+        if scope is not None:
+            context.budget_scope = scope
+        stated_price = self._price_constraint_from_instruction(message)
+
+        if context.selected_item_type is None:
+            question = (
+                "请先告诉我想处理哪一类："
+                + " 或 ".join(context.item_types)
+                + "。之后还需要确认预算是每件商品的上限还是合计预算。"
+            )
+            return None, self._finish_turn(
+                state,
+                message,
+                None,
+                trace
+                + [
+                    {
+                        "step": "bundle_purchase_clarification",
+                        "status": "awaiting_item_type",
+                        "item_types": list(context.item_types),
+                    }
+                ],
+                question,
+                "conflict",
+                pending_question=question,
+                pending_fields=["item_type", "budget_scope"],
+            )
+
+        if context.budget_scope is None:
+            question = (
+                f"已选择先看 {context.selected_item_type}。请再确认：原先的预算是每件商品的上限，"
+                "还是两件商品的合计预算？"
+            )
+            return None, self._finish_turn(
+                state,
+                message,
+                None,
+                trace
+                + [
+                    {
+                        "step": "bundle_purchase_clarification",
+                        "status": "awaiting_budget_scope",
+                        "selected_item_type": context.selected_item_type,
+                    }
+                ],
+                question,
+                "conflict",
+                pending_question=question,
+                pending_fields=["budget_scope"],
+            )
+
+        if context.budget_scope == "combined":
+            if "item_price_constraint" in state.pending_fields and stated_price.has_value():
+                return (
+                    self._bundle_selection_plan(
+                        state,
+                        context,
+                        stated_price,
+                        trace,
+                        source="combined_budget_item_allocation",
+                    ),
+                    None,
+                )
+            question = (
+                f"已选择先看 {context.selected_item_type}，并确认原预算是两件商品的合计预算。"
+                "当前系统不会自动拆分合计预算；请再给这一件商品单独设定预算上限，例如“马克杯 12 元以内”。"
+            )
+            return None, self._finish_turn(
+                state,
+                message,
+                None,
+                trace
+                + [
+                    {
+                        "step": "bundle_purchase_clarification",
+                        "status": "awaiting_item_budget",
+                        "selected_item_type": context.selected_item_type,
+                        "budget_scope": "combined",
+                    }
+                ],
+                question,
+                "conflict",
+                pending_question=question,
+                pending_fields=["item_price_constraint"],
+            )
+
+        effective_price = (
+            stated_price if stated_price.has_value() else context.original_price_constraint
+        )
+        if not effective_price.has_value():
+            question = f"已选择先看 {context.selected_item_type}，且预算按每件商品计算。请补充每件商品的预算上限。"
+            return None, self._finish_turn(
+                state,
+                message,
+                None,
+                trace
+                + [
+                    {
+                        "step": "bundle_purchase_clarification",
+                        "status": "awaiting_item_budget",
+                        "selected_item_type": context.selected_item_type,
+                        "budget_scope": "per_item",
+                    }
+                ],
+                question,
+                "conflict",
+                pending_question=question,
+                pending_fields=["item_price_constraint"],
+            )
+        return (
+            self._bundle_selection_plan(
+                state,
+                context,
+                effective_price,
+                trace,
+                source="per_item_budget",
+            ),
+            None,
         )
 
     @staticmethod

@@ -168,6 +168,69 @@ class ResilientContinuationTests(unittest.TestCase):
         )
         self.assertFalse(any(step["step"] == "turn_planning" for step in result["trace"]))
 
+    def test_bundle_type_answer_still_requires_budget_scope_before_recommendation(self) -> None:
+        """Choosing the first item must not silently turn a shared budget into a per-item limit."""
+        self.agent.llm = FailingLLM()
+        state = ConversationState()
+
+        self.agent.run_turn("我想买马克杯和T恤，预算20以内", state)
+        type_answer = self.agent.run_turn("先买马克杯吧", state)
+
+        self.assertEqual(type_answer["response_type"], "conflict")
+        self.assertIsNone(type_answer["purchased_product_id"])
+        self.assertEqual(type_answer["conversation_state"]["pending_fields"], ["budget_scope"])
+        self.assertEqual(
+            type_answer["conversation_state"]["bundle_context"]["selected_item_type"], "mug"
+        )
+        self.assertIn("每件商品的上限", type_answer["summary"])
+        self.assertFalse(any(step["step"] == "turn_planning" for step in type_answer["trace"]))
+
+        per_item_answer = self.agent.run_turn("每件商品预算20元以内", state)
+
+        self.assertEqual(per_item_answer["response_type"], "recommendation")
+        selected = self.repository.by_id[per_item_answer["purchased_product_id"]]
+        self.assertEqual(selected.item_type, "mug")
+        self.assertLessEqual(selected.price, 20)
+        self.assertIsNone(per_item_answer["conversation_state"]["bundle_context"])
+        self.assertTrue(
+            any(
+                step["step"] == "bundle_purchase_subtask"
+                and step["budget_scope"] == "per_item"
+                for step in per_item_answer["trace"]
+            )
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in per_item_answer["trace"]))
+
+    def test_bundle_combined_budget_requires_an_item_allocation(self) -> None:
+        """A combined limit needs an explicit item-level allocation before retrieval."""
+        self.agent.llm = FailingLLM()
+        state = ConversationState()
+
+        self.agent.run_turn("I need a mug and a shirt under $20.", state)
+        combined_answer = self.agent.run_turn("Mug first; total budget.", state)
+
+        self.assertEqual(combined_answer["response_type"], "conflict")
+        self.assertIsNone(combined_answer["purchased_product_id"])
+        self.assertEqual(
+            combined_answer["conversation_state"]["pending_fields"], ["item_price_constraint"]
+        )
+        self.assertIn("不会自动拆分合计预算", combined_answer["summary"])
+
+        allocation_answer = self.agent.run_turn("The mug should be under $12.", state)
+
+        self.assertEqual(allocation_answer["response_type"], "recommendation")
+        selected = self.repository.by_id[allocation_answer["purchased_product_id"]]
+        self.assertEqual(selected.item_type, "mug")
+        self.assertLess(selected.price, 12)
+        self.assertTrue(
+            any(
+                step["step"] == "bundle_purchase_subtask"
+                and step["source"] == "combined_budget_item_allocation"
+                for step in allocation_answer["trace"]
+            )
+        )
+        self.assertFalse(any(step["step"] == "turn_planning" for step in allocation_answer["trace"]))
+
     def test_multiple_types_in_a_catalog_question_do_not_trigger_bundle_clarification(self) -> None:
         """Multiple types without a purchase goal return separate verified ranges."""
         self.agent.llm = FailingLLM()
