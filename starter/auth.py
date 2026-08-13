@@ -46,10 +46,15 @@ def init_db() -> None:
             email         TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             name          TEXT,
+            role          TEXT NOT NULL DEFAULT 'user',
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    # 迁移：旧表可能没有 role 字段
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "role" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
     conn.commit()
     conn.close()
 
@@ -67,19 +72,21 @@ def create_user(email: str, password: str, name: str | None = None) -> dict:
     email = email.strip().lower()
     if not email or not password:
         raise AuthError("邮箱和密码不能为空")
+    admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+    role = "admin" if (admin_email and email == admin_email) else "user"
     user_id = uuid.uuid4().hex
     conn = _connection()
     try:
         conn.execute(
-            "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
-            (user_id, email, _hash_password(password), name),
+            "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
+            (user_id, email, _hash_password(password), name, role),
         )
         conn.commit()
     except sqlite3.IntegrityError:
         raise AuthError("该邮箱已注册") from None
     finally:
         conn.close()
-    return {"id": user_id, "email": email, "name": name}
+    return {"id": user_id, "email": email, "name": name, "role": role}
 
 
 def authenticate_user(email: str, password: str) -> dict:
@@ -90,7 +97,7 @@ def authenticate_user(email: str, password: str) -> dict:
     conn.close()
     if row is None or not _verify_password(password, row["password_hash"]):
         raise AuthError("邮箱或密码错误")
-    return {"id": row["id"], "email": row["email"], "name": row["name"]}
+    return {"id": row["id"], "email": row["email"], "name": row["name"], "role": row["role"]}
 
 
 def get_user_by_id(user_id: str) -> dict | None:
@@ -99,7 +106,23 @@ def get_user_by_id(user_id: str) -> dict | None:
     conn.close()
     if row is None:
         return None
-    return {"id": row["id"], "email": row["email"], "name": row["name"]}
+    return {"id": row["id"], "email": row["email"], "name": row["name"], "role": row["role"]}
+
+
+def set_admin_role(email: str) -> None:
+    """Promote a user to admin."""
+    conn = _connection()
+    conn.execute("UPDATE users SET role = 'admin' WHERE email = ?", (email.strip().lower(),))
+    conn.commit()
+    conn.close()
+
+
+def list_users() -> list[dict]:
+    """Return all users (id/email/name/role/created_at)."""
+    conn = _connection()
+    rows = conn.execute("SELECT id, email, name, role, created_at FROM users ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def create_access_token(user_id: str) -> str:

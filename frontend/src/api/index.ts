@@ -21,6 +21,7 @@ export interface User {
   id: string
   email: string
   name: string | null
+  role?: string
 }
 
 // ── auth ──────────────────────────────────────────────────────────────
@@ -133,5 +134,27 @@ export async function getFacets() {
 
 export async function health() {
   const r = await api.get('/health')
+  return r.data
+}
+
+// ── admin ──────────────────────────────────────────────────────────────
+
+export async function adminOrders() {
+  const r = await api.get('/admin/orders')
+  return r.data
+}
+
+export async function adminShipOrder(orderId: string) {
+  const r = await api.post(`/admin/orders/${orderId}/ship`)
+  return r.data
+}
+
+export async function adminDeliverOrder(orderId: string) {
+  const r = await api.post(`/admin/orders/${orderId}/deliver`)
+  return r.data
+}
+
+export async function adminUsers() {
+  const r = await api.get('/admin/users')
   return r.data
 }

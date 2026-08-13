@@ -578,6 +578,14 @@ class ConversationEvent:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ConversationEvent":
+        return cls(
+            turn=int(data.get("turn", 0)),
+            event_type=str(data.get("event_type", "")),
+            payload=dict(data.get("payload") or {}),
+        )
+
 
 @dataclass
 class TaskContext:
@@ -598,6 +606,18 @@ class TaskContext:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskContext":
+        return cls(
+            active_task=str(data.get("active_task", "none")),
+            selection_phase=str(data.get("selection_phase", "idle")),
+            selected_product_id=_optional_text(data.get("selected_product_id")),
+            candidate_product_ids=list(data.get("candidate_product_ids") or []),
+            last_information_target=_optional_text(data.get("last_information_target")),
+            last_information_operations=list(data.get("last_information_operations") or []),
+            last_action=_optional_text(data.get("last_action")),
+        )
 
 
 @dataclass
@@ -620,6 +640,15 @@ class BundleLineItem:
             "quantity": self.quantity,
             "concepts": [asdict(concept) for concept in self.concepts],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BundleLineItem":
+        concepts = [Concept.from_dict(c) for c in (data.get("concepts") or [])]
+        return cls(
+            item_type=str(data.get("item_type", "")),
+            quantity=int(data.get("quantity", 1)),
+            concepts=[c for c in concepts if c is not None],
+        )
 
 
 @dataclass
@@ -646,6 +675,16 @@ class BundlePurchaseContext:
             "budget_scope": self.budget_scope,
             "original_price_constraint": self.original_price_constraint.to_dict(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BundlePurchaseContext":
+        return cls(
+            item_types=list(data.get("item_types") or []),
+            line_items=[BundleLineItem.from_dict(i) for i in (data.get("line_items") or [])],
+            selected_item_type=_optional_text(data.get("selected_item_type")),
+            budget_scope=_optional_text(data.get("budget_scope")),
+            original_price_constraint=PriceConstraint.from_value(data.get("original_price_constraint") or {}),
+        )
 
 
 @dataclass
@@ -896,6 +935,26 @@ class ConversationState:
             "preference_profile": self.preference_profile.to_dict(),
             "pending_local_action": self.pending_local_action,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ConversationState":
+        """Restore a full conversation state from its ``to_dict`` output."""
+        state = cls(conversation_id=str(data.get("conversation_id", uuid4().hex[:12])))
+        state.events = [ConversationEvent.from_dict(e) for e in (data.get("events") or [])]
+        state.pending_question = _optional_text(data.get("pending_question"))
+        state.pending_fields = list(data.get("pending_fields") or [])
+        state.status = str(data.get("status", "collecting"))
+        state.turn_count = int(data.get("turn_count", 0))
+        state.last_catalog_context = dict(data.get("last_catalog_context") or {}) or None
+        if data.get("bundle_context"):
+            state.bundle_context = BundlePurchaseContext.from_dict(data["bundle_context"])
+        state.task_context = TaskContext.from_dict(data.get("task_context") or {})
+        state.saved_product_ids = list(data.get("saved_product_ids") or [])
+        state.simulated_orders = [dict(o) for o in (data.get("simulated_orders") or [])]
+        state.preference_profile = PreferenceProfile.from_dict(data.get("preference_profile") or {})
+        state.local_collections_loaded = bool(data.get("local_collections_loaded", False))
+        state.pending_local_action = _optional_text(data.get("pending_local_action"))
+        return state
 
 
 @dataclass

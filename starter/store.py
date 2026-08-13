@@ -66,6 +66,13 @@ def init_db() -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, product_id)
         );
+        CREATE TABLE IF NOT EXISTS conversations (
+            conversation_id TEXT PRIMARY KEY,
+            user_id         TEXT,
+            state_json      TEXT NOT NULL,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     conn.commit()
@@ -321,6 +328,100 @@ def deliver_order(user_id: str, order_id: str) -> dict:
     conn.commit()
     conn.close()
     return get_order(user_id, order_id)
+
+
+# ── admin (cross-user order management) ────────────────────────────────
+
+def list_all_orders() -> list[dict]:
+    """列出所有用户的订单（管理员用）。"""
+    conn = _connection()
+    rows = conn.execute(
+        "SELECT * FROM orders ORDER BY created_at DESC"
+    ).fetchall()
+    orders = []
+    for r in rows:
+        items = conn.execute(
+            "SELECT product_id, quantity, unit_price FROM order_items WHERE order_id = ?",
+            (r["id"],),
+        ).fetchall()
+        orders.append({
+            "order_id": r["id"],
+            "user_id": r["user_id"],
+            "status": r["status"],
+            "total_price": r["total_price"],
+            "created_at": r["created_at"],
+            "items": [{"product_id": i["product_id"], "quantity": i["quantity"], "unit_price": i["unit_price"]} for i in items],
+        })
+    conn.close()
+    return orders
+
+
+def _admin_transition(order_id: str, from_status: str, to_status: str, err_msg: str) -> dict:
+    conn = _connection()
+    row = conn.execute("SELECT user_id, status FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise StoreError("订单不存在")
+    if row["status"] != from_status:
+        conn.close()
+        raise StoreError(err_msg)
+    conn.execute(
+        "UPDATE orders SET status = ?, updated_at = ? WHERE id = ?",
+        (to_status, datetime.now(timezone.utc).isoformat(), order_id),
+    )
+    conn.commit()
+    conn.close()
+    # 复用 get_order（需要 user_id）
+    return get_order(row["user_id"], order_id)
+
+
+def admin_ship_order(order_id: str) -> dict:
+    return _admin_transition(order_id, "confirmed", "shipped", "该订单状态无法发货")
+
+
+def admin_deliver_order(order_id: str) -> dict:
+    return _admin_transition(order_id, "shipped", "delivered", "该订单状态无法送达")
+
+
+# ── conversations ──────────────────────────────────────────────────────
+
+def save_conversation(conversation_id: str, user_id: str | None, state_json: str) -> None:
+    """Upsert a conversation's serialized state."""
+    conn = _connection()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO conversations (conversation_id, user_id, state_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(conversation_id) DO UPDATE SET
+            user_id = excluded.user_id,
+            state_json = excluded.state_json,
+            updated_at = excluded.updated_at
+        """,
+        (conversation_id, user_id, state_json, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_conversation(conversation_id: str) -> dict | None:
+    """Return a conversation's state dict, or None if absent."""
+    conn = _connection()
+    row = conn.execute(
+        "SELECT state_json FROM conversations WHERE conversation_id = ?", (conversation_id,)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    import json
+    return json.loads(row["state_json"])
+
+
+def delete_conversation(conversation_id: str) -> None:
+    conn = _connection()
+    conn.execute("DELETE FROM conversations WHERE conversation_id = ?", (conversation_id,))
+    conn.commit()
+    conn.close()
 
 
 init_db()

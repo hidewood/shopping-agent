@@ -17,6 +17,7 @@ GET  /api/catalog/facets         — browse catalog facets
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -92,8 +93,6 @@ app.add_middleware(
 
 # ── shared agent instance ──────────────────────────────────────────────
 _agent = Agent(DATA_DIR)
-# In-memory conversation store (replace with a database for production).
-_conversations: dict[str, ConversationState] = {}
 
 
 # ── request / response models ──────────────────────────────────────────
@@ -128,6 +127,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: str | None = None
+    role: str = "user"
 
 
 class TokenResponse(BaseModel):
@@ -152,6 +152,12 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")
     return UserResponse(**user)
+
+
+def require_admin(user: UserResponse = Depends(get_current_user)) -> UserResponse:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
 
 
 # ── auth endpoints ─────────────────────────────────────────────────────
@@ -341,6 +347,34 @@ async def deliver_order(order_id: str, user: UserResponse = Depends(get_current_
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
+# ── admin endpoints ────────────────────────────────────────────────────
+
+@app.get("/admin/orders")
+async def admin_orders(_: UserResponse = Depends(require_admin)) -> list[dict]:
+    return [_enrich_order(o) for o in store.list_all_orders()]
+
+
+@app.post("/admin/orders/{order_id}/ship")
+async def admin_ship(order_id: str, _: UserResponse = Depends(require_admin)) -> dict:
+    try:
+        return _enrich_order(store.admin_ship_order(order_id))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.post("/admin/orders/{order_id}/deliver")
+async def admin_deliver(order_id: str, _: UserResponse = Depends(require_admin)) -> dict:
+    try:
+        return _enrich_order(store.admin_deliver_order(order_id))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.get("/admin/users")
+async def admin_users(_: UserResponse = Depends(require_admin)) -> list[dict]:
+    return auth.list_users()
+
+
 # ── health ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -359,24 +393,26 @@ async def health() -> dict[str, Any]:
 async def create_conversation() -> dict[str, str]:
     state = ConversationState()
     _agent.restore_local_session(state)
-    _conversations[state.conversation_id] = state
+    store.save_conversation(state.conversation_id, None, json.dumps(state.to_dict(), ensure_ascii=False))
     return {"conversation_id": state.conversation_id}
 
 
 @app.get("/api/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str) -> dict[str, Any]:
-    state = _conversations.get(conversation_id)
-    if state is None:
+    data = store.load_conversation(conversation_id)
+    if data is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return state.to_dict()
+    return data
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
 async def send_message(conversation_id: str, body: MessageRequest) -> TurnResponse:
-    state = _conversations.get(conversation_id)
-    if state is None:
+    data = store.load_conversation(conversation_id)
+    if data is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    state = ConversationState.from_dict(data)
     result = _agent.run_turn(body.message, state)
+    store.save_conversation(conversation_id, None, json.dumps(state.to_dict(), ensure_ascii=False))
     catalog = result.get("catalog_data") or {}
     return TurnResponse(
         conversation_id=conversation_id,

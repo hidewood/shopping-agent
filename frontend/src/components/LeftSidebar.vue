@@ -15,11 +15,12 @@ onMounted(() => auth.loadUser())
 
 const navItems = [
   { key: 'new', label: '新会话', action: () => store.reset() },
-  { key: 'chat', label: '购物对话', action: () => router.push('/') },
+  { key: 'chat', label: '购物对话', action: () => router.push('/chat') },
   { key: 'catalog', label: '商品库', action: () => router.push('/catalog') },
   { key: 'cart', label: '购物车', action: () => router.push('/cart') },
   { key: 'favorites', label: '收藏', action: () => router.push('/favorites') },
   { key: 'orders', label: '订单', action: () => router.push('/orders') },
+  { key: 'admin', label: '管理后台', action: () => router.push('/admin') },
 ]
 
 const icons: Record<string, string> = {
@@ -29,11 +30,12 @@ const icons: Record<string, string> = {
   cart: 'M9 22a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM20 22a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6',
   orders: 'M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM14 2v6h6',
   favorites: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z',
+  admin: 'M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6',
   user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
 }
 
 function isActive(key: string) {
-  const map: Record<string, string> = { chat: '/', catalog: '/catalog', cart: '/cart', favorites: '/favorites', orders: '/orders' }
+  const map: Record<string, string> = { chat: '/chat', catalog: '/catalog', cart: '/cart', favorites: '/favorites', orders: '/orders' }
   return route.path === map[key]
 }
 </script>
@@ -66,30 +68,31 @@ function isActive(key: string) {
 
     <!-- Nav -->
     <nav class="flex-1 px-3 space-y-1">
-      <button
-        v-for="item in navItems"
-        :key="item.key"
-        @click="item.action"
-        :title="collapsed ? item.label : ''"
-        class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[14px] transition-colors text-left text-ink-soft hover:bg-black/[0.04] cursor-pointer"
-        :class="[
-          isActive(item.key) ? 'bg-accent-50 text-accent-600 font-medium' : '',
-          collapsed ? 'justify-center px-0' : '',
-        ]"
-      >
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
-          :stroke="isActive(item.key) ? '#007AFF' : 'currentColor'"
-          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path :d="icons[item.key]" />
-        </svg>
-        <span v-if="!collapsed" class="flex-1">{{ item.label }}</span>
-      </button>
+      <template v-for="item in navItems" :key="item.key">
+        <button
+          v-if="item.key !== 'admin' || auth.user?.role === 'admin'"
+          @click="item.action"
+          :title="collapsed ? item.label : ''"
+          class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[14px] transition-colors text-left text-ink-soft hover:bg-black/[0.04] cursor-pointer"
+          :class="[
+            isActive(item.key) ? 'bg-accent-50 text-accent-600 font-medium' : '',
+            collapsed ? 'justify-center px-0' : '',
+          ]"
+        >
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+            :stroke="isActive(item.key) ? '#007AFF' : 'currentColor'"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path :d="icons[item.key]" />
+          </svg>
+          <span v-if="!collapsed" class="flex-1">{{ item.label }}</span>
+        </button>
+      </template>
     </nav>
 
     <!-- 底部：登录/用户状态 -->
     <div class="p-3 border-t border-white/60">
       <div v-if="!auth.user" class="flex" :class="collapsed ? 'justify-center' : ''">
-        <button @click="router.push('/login')" class="flex-1 py-2 rounded-xl bg-accent-500 text-white text-sm font-medium hover:bg-accent-700 transition-colors cursor-pointer">
+        <button @click="router.push('/login')" class="flex-1 py-2 rounded-xl bg-accent-500 text-white text-sm font-medium hover:bg-accent-700 transition-colors cursor-pointer flex items-center justify-center">
           <span v-if="!collapsed">登录</span>
           <svg v-else width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="icons.user"/></svg>
         </button>

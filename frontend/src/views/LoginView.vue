@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
 
 const mode = ref<'login' | 'register'>('login')
 const email = ref('')
@@ -22,12 +23,17 @@ async function submit() {
     } else {
       await auth.register(email.value, password.value, name.value || undefined)
     }
-    router.push('/')
+    const redirect = route.query.redirect as string
+    router.push(redirect || '/chat')
   } catch (e: any) {
     error.value = e?.response?.data?.detail || '操作失败，请重试'
   } finally {
     loading.value = false
   }
+}
+
+function guest() {
+  router.push('/chat')
 }
 </script>
 
@@ -68,6 +74,18 @@ async function submit() {
             {{ mode === 'login' ? '注册' : '登录' }}
           </button>
         </p>
+
+        <!-- 分隔线 -->
+        <div class="flex items-center gap-3">
+          <div class="flex-1 h-px bg-hairline"></div>
+          <span class="text-xs text-ink-faint">或</span>
+          <div class="flex-1 h-px bg-hairline"></div>
+        </div>
+
+        <!-- 游客进入 -->
+        <button @click="guest" class="w-full py-3 rounded-full border border-hairline text-ink-soft text-sm font-medium hover:bg-black/[0.03] transition-colors cursor-pointer">
+          游客进入（仅浏览和对话）
+        </button>
       </div>
     </div>
   </div>
