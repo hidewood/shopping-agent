@@ -1,142 +1,181 @@
 # 智能购物 Agent
 
-一个面向本地电商目录的自然语言购物 Agent 原型。用户可以用中英文逐步描述要购买的商品、预算、主题和厂商；系统先让大模型把话语转换为受限计划，再由本地代码检索商品库、校验约束、稳定排序并解释结果。
+一个面向本地电商目录的自然语言购物 Agent。用户可以用中英文逐步描述要购买的商品、预算、主题和厂商；系统先让大模型把话语转换为受限计划（TurnPlan），再由本地代码检索商品库、校验约束、稳定排序并解释结果。
 
-本项目对应“Agent 工作流构建”任务：覆盖需求理解、商品搜索、候选比较、约束检查、购买决策与结果说明，并额外实现多轮填槽、主动引导、状态隔离、显式组合方案、本地收藏/模拟订单和失败边界。
+项目完整覆盖了「需求理解 → 商品搜索 → 候选比较 → 约束检查 → 购买决策 → 结果说明」的 Agent 工作流，并进一步实现了**用户认证、收藏、购物车、订单、管理员后台、游客链路和数据持久化**，形成一个完整的购物闭环。
 
 | 文档 | 作用 |
 | --- | --- |
-| [实验报告](docs/experiment-report.md) | 大模型使用方式、Agent 工作流、提示词/工具设计与结果分析。 |
-| [测试用例](docs/test-report.md) | 覆盖对话、检索、状态、异常与界面的人工测试输入及期望结果。 |
+| [实验报告](docs/experiment-report.md) | 大模型使用方式、Agent 工作流、提示词/工具设计与结果分析 |
+| [测试用例](docs/test-report.md) | 覆盖对话、检索、状态、异常与界面的人工测试输入及期望结果 |
+| [手动测试样例](docs/manual-test-cases.md) | 63 条自然语言测试样例（按场景分类） |
+| [发展规划](docs/DEVELOPMENT_PLAN.md) | 项目演进记录与待办 |
 
-## 1. 设计目标
-
-购物对话的难点不只是“找商品”，还包括把模糊表达、安全边界和可验证事实区分开。项目采用以下原则：
+## 1. 核心设计原则
 
 1. **大模型负责理解，不负责编造事实。** DeepSeek 仅输出本轮意图与需求增量，不直接决定商品或编造目录字段。
 2. **商品库事实由代码负责。** 商品检索、计数、详情、比较、硬约束过滤和排序均只读取 `data/products.jsonl`。
-3. **多轮对话以状态机维护。** 用户可先说商品类型，再补充预算、主题或厂商；目录查询和商品详情不会覆盖正在进行的选购任务。
-4. **结果可核验。** 推荐结果展示筛选条件、商品卡片和可折叠的候选/Trace 依据。
-5. **边界诚实。** 真实订单、支付和取消订单未接入执行器，系统会明确拒绝；收藏和模拟订单仅为本地模拟，绝不触发交易。
-6. **组合方案需明确触发。** 用户明确要求“组合方案 / bundle”后，系统将请求拆成若干行项目，按每件预算分别检索，或在合计预算下搜索并验证可行组合；不会让模型臆测预算分配。
-7. **可变词汇放在数据配置中。** 商品别名、主题别名、意图补充词和组合数量上限位于 `data/catalog_language.json`；配置缺失或格式错误时，系统回退到内置安全默认值。
-8. **会话偏好可解释且可控。** 只有用户明确收藏商品或创建本地模拟订单时，系统才会记录该商品的目录属性，作为同价候选的次级排序信号；当前轮的类型、预算、主题和严格厂商条件始终优先。
+3. **多轮对话以事件溯源状态机维护。** 用户可先说类型，再补充预算、主题或厂商；目录查询不会覆盖正在进行的选购任务。
+4. **结果可核验。** 每一步都有结构化 Trace，推荐结果展示筛选条件、商品卡片和排序依据。
+5. **边界诚实。** 真实订单、支付未接入执行器；收藏/购物车/订单为本地模拟，绝不触发真实交易。
+6. **鲁棒性优先。** 对模型输出做了多层容错（JSON Schema 校验、字段归一化、JSON 修复、一次协议修复）。
+7. **会话偏好可解释。** 用户收藏的商品属性会形成排序偏好信号，作为同价候选的次级排序依据；当前轮的显式约束始终优先。
 
-![系统概览：模型只负责 TurnPlan 规划，本地代码验证商品事实与排序](docs/screenshots/architecture-ai.png)
+## 2. 功能特性
 
-## 2. 能力与边界
+### 2.1 购物对话（核心 Agent）
 
-| 能力 | 示例 | 执行方式 |
-| --- | --- | --- |
-| 商品探索 | `我想买一个马克杯` | 展示该类型的真实价格区间、常见标签与目录样例。 |
-| 多轮筛选 | `Ocean主题，预算20元以内` | 合并已知商品类型，按主题与预算进行硬过滤。 |
-| 直接推荐 | `我想买一件T恤，不限预算和风格，直接推荐一个` | 对明确开放式需求直接推荐，不强制用户填写全部槽位。 |
-| 目录问答 | `衬衫有什么价位？` | 返回真实目录统计，不改变选购状态。 |
-| 商品详情/比较 | `介绍 P0005`、`比较 P0005 和 P0011` | 仅根据真实商品 ID 返回字段。 |
-| 无结果处理 | `Ocean主题马克杯，预算8元以内` | 如实报告无匹配，并给出只放宽一个条件后的最近方案。 |
-| 组合方案 | `马克杯和T恤，总预算20以内，给我组合方案` | 按行项目搜索并验证合计价格，返回一组可核验组合。 |
-| 本地收藏/模拟订单 | `收藏 P0005`、`查看收藏`、`创建模拟订单 P0005`、`查看模拟订单`、`取消模拟订单 SIM-0001` | 仅写入当前设备的会话存储；订单状态为 `confirmed_local` 或 `cancelled_local`，不调用支付或真实订单服务。 |
-| 真实交易请求 | `下单 P0005` | 明确提示当前不支持创建订单、支付或取消订单。 |
+| 能力 | 示例 |
+| --- | --- |
+| 商品探索 | `我想买一个马克杯` → 展示价格区间、常见标签与目录样例 |
+| 多轮筛选 | `预算20以内` → `海洋主题的` → 逐步追加约束 |
+| 直接推荐 | `推荐一件T恤，不限预算和风格` |
+| 目录问答 | `衬衫有什么价位？`、`最便宜的马克杯多少钱？` |
+| 商品详情/比较 | `介绍 P0005`、`比较 P0005 和 P0011` |
+| 无结果处理 | 如实报告无匹配 + 给出放宽一个条件后的最近方案 |
+| 组合方案 | `马克杯和T恤，总预算20以内，给我组合方案`（per-item / combined 两种预算模式） |
+| 中英文混合 | `find me a shirt, budget 20` |
 
-当前商品库共有 1,740 件商品，其中 `mug` 与 `shirt` 各 870 件。商品名称、厂商、标签与描述保留原始英文目录值；界面与对话支持中英文输入。
+### 2.2 电商闭环（服务端）
 
-## 3. 工作流一览
+- **用户认证**：注册 / 登录 / JWT（bcrypt 密码哈希）
+- **游客链路**：打开进入登录页，游客可浏览商品库和购物对话，收藏/购物车/订单需登录
+- **收藏**：收藏商品影响后续推荐排序（"越用越懂你"）
+- **购物车**：增删改查 + 数量控制 + 结算
+- **订单**：下单 → 发货 → 送达 → 取消（完整状态机，本地模拟）
+- **对话历史**：登录用户的对话持久化，可回顾并继续历史会话
+- **管理员后台**：订单管理（发货/送达）、用户管理、商品查看
 
-```text
-用户消息
-  → 输入完整性检查与强意图信号提取
-  → DeepSeek 生成受限 TurnPlan（或命中高置信状态规则）
-  → JSON Schema/字段组合/授权证据校验，必要时仅修复一次
-  → 路由：聊天 | 目录查询 | 商品详情/比较 | 选购推荐 | 本地收藏/模拟订单 | 交易能力检查
-  → 选购时：状态归约 → 目录接地 → 硬过滤 → 显式偏好/会话偏好/价格排序 → Trace 展示
+### 2.3 数据持久化
+
+所有数据统一存储在 SQLite 数据库（`local_state/` 下，gitignored）：
+
+| 数据 | 存储 |
+| --- | --- |
+| 账号（含角色） | `users.db` |
+| 购物车 / 订单 / 收藏 / 对话记录 | `store.db` |
+
+## 3. 技术架构
+
+```
+┌─────────────────────────────────────────┐
+│  Vue3 前端（Apple 风三栏布局 + 毛玻璃）   │
+│  登录 / 对话 / 商品库 / 购物车 / 订单 /    │
+│  收藏 / 历史会话 / 管理后台               │
+└───────────────┬─────────────────────────┘
+                │ REST (JWT)
+┌───────────────┴─────────────────────────┐
+│  FastAPI 服务层                          │
+│  ├── /auth    认证                       │
+│  ├── /cart    购物车                     │
+│  ├── /orders  订单 + 状态机              │
+│  ├── /favorites 收藏                    │
+│  ├── /api/conversations 对话（持久化）   │
+│  ├── /api/products 商品检索             │
+│  └── /admin   管理员                    │
+└───────────────┬─────────────────────────┘
+                │
+┌───────────────┴─────────────────────────┐
+│  ShoppingAgent（核心，纯函数式）          │
+│  理解需求 → 检索 → 硬过滤 → 确定性排序    │
+└───────────────┬─────────────────────────┘
+                │
+┌───────────────┴─────────────────────────┐
+│  数据层                                  │
+│  SQLite（users/store）+ products.jsonl  │
+└─────────────────────────────────────────┘
 ```
 
-推荐先考虑当前消息中已验证的显式偏好；只有显式偏好不能区分候选时，才会使用会话内“收藏/模拟订单”形成的厂商、标签和类型偏好，最后按价格与商品 ID 稳定排序。商品类型、预算、明确主题与明确厂商属于硬约束；“喜欢”“优先”等表达仅影响排序，不会错误造成零结果。
+**核心工作流**（一次用户轮）：
 
-完整状态机、异常分支和设计动机见[实验报告](docs/experiment-report.md)。
+```
+用户消息
+  → 输入完整性检查 + 强意图信号提取
+  → 确定性分支（本地收藏/组合方案/开放式推荐等）
+  → DeepSeek 生成 TurnPlan（goal + target + requirement + catalog_operations）
+  → JSON Schema 校验 + 字段归一化容错 + 一次协议修复
+  → 路由：聊天 | 目录查询 | 商品详情/比较 | 选购推荐 | 交易能力检查
+  → 选购时：状态归约 → 目录接地 → 硬过滤 → 显式偏好/会话偏好/价格排序 → Trace
+```
+
+**模型只负责规划，代码负责事实**：候选排序完全由 Python 确定性完成（显式偏好 → 会话收藏偏好 → 价格 → 商品 ID），不调用第二次 LLM。
 
 ## 4. 快速开始
 
-环境要求：Python 3.10+。
+环境要求：Python 3.10+、Node.js 18+。
+
+### 4.1 后端
 
 ```bash
-python -m venv .venv
-```
-
-Windows PowerShell：
-
-```powershell
-.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-Copy-Item .env.example .env
+# 配置 .env（见下方环境变量）
+python -m uvicorn starter.api:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-在 `.env` 中填写自己的 DeepSeek API Key：
+### 4.2 前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+访问 `http://localhost:5173`（Vite dev server 会把 `/api`、`/images`、`/avatars` 代理到后端 8000）。
+
+### 4.3 环境变量（`.env`）
 
 ```env
 DEEPSEEK_API_KEY=your_api_key_here
-DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MODEL=deepseek-v4-pro
 AGENT_MAX_CANDIDATES=8
 DEEPSEEK_TIMEOUT_SECONDS=45
 DEEPSEEK_MAX_RETRIES=1
-DEEPSEEK_CIRCUIT_BREAKER_SECONDS=20
-# 可选：本机收藏、模拟订单和会话偏好的存储目录
-# AGENT_LOCAL_STATE_DIR=local_state
+DEEPSEEK_CIRCUIT_BREAKER_SECONDS=60
+# 可选
+# JWT_SECRET_KEY=your-strong-random-secret
+# ADMIN_EMAIL=admin@example.com   # 注册该邮箱自动成为管理员
 ```
 
-`DEEPSEEK_MODEL` 可按账户实际可用模型调整；未设置时，代码默认使用 `deepseek-v4-pro`。`.env` 已被 Git 忽略，不能提交真实密钥。
-
-启动界面：
+## 5. 测试
 
 ```bash
-streamlit run app.py
-```
-
-打开命令行显示的本地地址（通常为 `http://localhost:8501`）。点击“新建对话”可开启独立会话；推荐结果可展开查看备选商品、过滤数量和结构化核验记录。每个会话地址带有一个本地会话标识，用于恢复该设备上的收藏、模拟订单和排序偏好；聊天原文、密钥、支付信息不会写入本地状态文件。
-
-## 5. 测试与复现
-
-运行不依赖 API Key 的完整离线测试：
-
-```bash
+# 完整离线测试（156 项）
 python -m unittest discover -s tests -v
+
+# 真实 API 冒烟测试
+$env:RUN_LIVE_API_TESTS="1"; python -m unittest tests.test_live_api_smoke -v
+
+# 手动测试样例（63 条，调用真实 DeepSeek）
+python tests/run_manual_tests.py
+
+# 50 条公开任务评测
+python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output docs/task-evaluation.md
 ```
-
-完整回归共 **145 项**；最近一次本地回归拆分执行后，144 项离线测试均通过，另有 1 项真实 API 冒烟测试因未配置 `RUN_LIVE_API_TESTS=1` 而跳过。拆分执行用于避免单个测试进程在受限环境中的超时，不影响测试内容。覆盖目录接地、状态归约、路由、价格区间、主动引导、无结果、多行组合搜索、会话偏好、本地收藏/模拟订单恢复、模型调用指标、语言配置回退，以及 `2个 Ocean mug` 这类“数量＋主题＋品类”表达。
-
-配置好 API Key 后，可单独执行真实模型与目录查询的最小连通性检查：
-
-```powershell
-$env:RUN_LIVE_API_TESTS="1"
-python -m unittest tests.test_live_api_smoke -v
-```
-
-该检查发送一条闲聊和一条目录查询，不写入订单或外部业务数据。2026-08-12 的执行结果为 **1/1 通过**。
-
-若已配置 API Key，可执行 50 条公开任务的真实 API 评测：
-
-```bash
-python tests/task_evaluation.py --output outputs/task-evaluation.json --markdown-output outputs/task-evaluation.md
-```
-
-该命令会在本地 `outputs/` 中生成可审阅记录，并核验返回商品的类型、主题、预算、严格厂商条件、可用偏好厂商与确定性排序 Trace。历史真实 API 记录为 50/50 通过；完整的人工测试输入与期望结果见[测试用例](docs/test-report.md)。
 
 ## 6. 项目结构
 
 ```text
-app.py                         # Streamlit 交互与结果展示
-starter/agent_interface.py     # 模型调用、提示词、状态机、目录工具与决策
-data/products.jsonl            # 1,740 件商品目录
-data/catalog_language.json     # 中英文别名、意图补充词、组合搜索与排序策略限额
-data/tasks.jsonl               # 50 条公开模拟购物任务
-tests/                         # 离线回归、真实 API 冒烟与任务评测脚本
-docs/experiment-report.md      # 实验报告
-docs/test-report.md            # 测试用例与期望结果
-docs/screenshots/              # 报告所用流程图与真实界面证据
+starter/
+  agent_interface.py   # Agent 核心：提示词、状态机、目录检索、确定性排序
+  config.py            # 配置（环境变量）
+  llm_client.py        # LLM Provider 抽象 + DeepSeekClient + 熔断器
+  common.py            # 共享工具函数
+  api.py               # FastAPI 端点（认证/购物车/订单/收藏/对话/管理员）
+  auth.py              # 用户认证（SQLite + JWT + bcrypt）
+  store.py             # 购物车/订单/收藏/对话持久化（SQLite）
+frontend/              # Vue3 + TypeScript + Tailwind 前端
+data/
+  products.jsonl       # 1,740 件商品目录
+  catalog_language.json # 中英文别名 + 限额配置
+  images/              # 商品图片（1,746 张）
+  avatars/             # 头像
+  tasks.jsonl          # 50 条公开任务
+tests/                 # 156 项离线测试 + 手动测试脚本
+docs/                  # 实验报告、测试文档、发展规划
 ```
 
-## 7. 数据来源与当前限制
+## 7. 数据来源与限制
 
-`data/products.jsonl` 来自 [stockholmux/ecommerce-sample-set](https://github.com/stockholmux/ecommerce-sample-set)，许可证为 Creative Commons Attribution-Share Alike 3.0 Unported。
+`data/products.jsonl` 来自 [stockholmux/ecommerce-sample-set](https://github.com/stockholmux/ecommerce-sample-set)，许可证为 Creative Commons Attribution-Share Alike 3.0 Unported。商品图片、头像等素材来自该仓库。
 
-这是一个可运行原型而非完整电商系统：未接入账户认证、库存预占、真实订单、支付、物流、退换货、实时商品图片或服务端数据库。收藏、模拟订单和会话偏好只保存在当前设备的本地会话文件中，不可跨设备同步，也不能代替真实订单记录。组合搜索在候选空间较小时穷举；空间较大时采用有上限的确定性搜索，并将策略写入 Trace。中文别名和模糊主题的覆盖范围也受目录标签限制。系统会把无法接地的硬条件明确标为无法满足，而不会虚构匹配结果。
+这是一个可运行原型而非完整电商系统：未接入真实支付、库存预占、物流、退换货。收藏、购物车、订单均为本地模拟（SQLite），不触发真实交易。JWT secret 默认值仅用于开发，生产环境需配置强随机密钥。
