@@ -4,7 +4,11 @@
 
 body {
   font-family: -apple-system, 'SF Pro Display', Inter, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #ececee;
+  background:
+    radial-gradient(ellipse at 15% 20%, rgba(139, 92, 246, 0.12), transparent 50%),
+    radial-gradient(ellipse at 85% 15%, rgba(10, 132, 255, 0.10), transparent 50%),
+    radial-gradient(ellipse at 70% 85%, rgba(255, 149, 0, 0.06), transparent 50%),
+    #ECECEE;
   color: #111111;
   -webkit-font-smoothing: antialiased;
 }

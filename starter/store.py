@@ -60,6 +60,12 @@ def init_db() -> None:
             quantity   INTEGER NOT NULL DEFAULT 1,
             unit_price REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id    TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, product_id)
+        );
         """
     )
     conn.commit()
@@ -152,6 +158,41 @@ def get_cart(user_id: str) -> dict:
     return {"cart_id": cart_id, "items": items}
 
 
+# ── favorites ──────────────────────────────────────────────────────────
+
+def add_favorite(user_id: str, product_id: str) -> None:
+    """收藏商品（重复收藏幂等，不报错）。"""
+    conn = _connection()
+    conn.execute(
+        "INSERT OR IGNORE INTO favorites (user_id, product_id, created_at) VALUES (?, ?, ?)",
+        (user_id, product_id, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_favorite(user_id: str, product_id: str) -> None:
+    """取消收藏商品（不存在时静默成功）。"""
+    conn = _connection()
+    conn.execute(
+        "DELETE FROM favorites WHERE user_id = ? AND product_id = ?",
+        (user_id, product_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_favorites(user_id: str) -> list[dict]:
+    """返回收藏列表，每项含 product_id 与 created_at。"""
+    conn = _connection()
+    rows = conn.execute(
+        "SELECT product_id, created_at FROM favorites WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [{"product_id": r["product_id"], "created_at": r["created_at"]} for r in rows]
+
+
 # ── orders ─────────────────────────────────────────────────────────────
 
 def create_order(user_id: str, products: list[dict]) -> dict:
@@ -233,6 +274,48 @@ def cancel_order(user_id: str, order_id: str) -> dict:
         raise StoreError("该订单状态无法取消")
     conn.execute(
         "UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), order_id),
+    )
+    conn.commit()
+    conn.close()
+    return get_order(user_id, order_id)
+
+
+def ship_order(user_id: str, order_id: str) -> dict:
+    """发货：仅 confirmed 状态的订单可发货。"""
+    conn = _connection()
+    row = conn.execute(
+        "SELECT status FROM orders WHERE id = ? AND user_id = ?", (order_id, user_id)
+    ).fetchone()
+    if row is None:
+        conn.close()
+        raise StoreError("订单不存在")
+    if row["status"] != "confirmed":
+        conn.close()
+        raise StoreError("该订单状态无法发货")
+    conn.execute(
+        "UPDATE orders SET status = 'shipped', updated_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), order_id),
+    )
+    conn.commit()
+    conn.close()
+    return get_order(user_id, order_id)
+
+
+def deliver_order(user_id: str, order_id: str) -> dict:
+    """送达：仅 shipped 状态的订单可送达。"""
+    conn = _connection()
+    row = conn.execute(
+        "SELECT status FROM orders WHERE id = ? AND user_id = ?", (order_id, user_id)
+    ).fetchone()
+    if row is None:
+        conn.close()
+        raise StoreError("订单不存在")
+    if row["status"] != "shipped":
+        conn.close()
+        raise StoreError("该订单状态无法送达")
+    conn.execute(
+        "UPDATE orders SET status = 'delivered', updated_at = ? WHERE id = ?",
         (datetime.now(timezone.utc).isoformat(), order_id),
     )
     conn.commit()

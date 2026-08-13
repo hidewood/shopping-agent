@@ -18,6 +18,7 @@ const navItems = [
   { key: 'chat', label: '购物对话', action: () => router.push('/') },
   { key: 'catalog', label: '商品库', action: () => router.push('/catalog') },
   { key: 'cart', label: '购物车', action: () => router.push('/cart') },
+  { key: 'favorites', label: '收藏', action: () => router.push('/favorites') },
   { key: 'orders', label: '订单', action: () => router.push('/orders') },
 ]
 
@@ -27,11 +28,12 @@ const icons: Record<string, string> = {
   catalog: 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z',
   cart: 'M9 22a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM20 22a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6',
   orders: 'M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM14 2v6h6',
+  favorites: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z',
   user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
 }
 
 function isActive(key: string) {
-  const map: Record<string, string> = { chat: '/', catalog: '/catalog', cart: '/cart', orders: '/orders' }
+  const map: Record<string, string> = { chat: '/', catalog: '/catalog', cart: '/cart', favorites: '/favorites', orders: '/orders' }
   return route.path === map[key]
 }
 </script>

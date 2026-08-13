@@ -67,6 +67,23 @@ export async function clearCart() {
   return r.data
 }
 
+// ── favorites ─────────────────────────────────────────────────────────
+
+export async function addFavorite(productId: string) {
+  const r = await api.post('/favorites', { product_id: productId })
+  return r.data.favorites
+}
+
+export async function getFavorites() {
+  const r = await api.get('/favorites')
+  return r.data.favorites
+}
+
+export async function removeFavorite(productId: string) {
+  const r = await api.delete(`/favorites/${productId}`)
+  return r.data.favorites
+}
+
 // ── orders ────────────────────────────────────────────────────────────
 
 export async function createOrder() {

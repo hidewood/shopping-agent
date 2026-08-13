@@ -235,6 +235,42 @@ async def clear_cart(user: UserResponse = Depends(get_current_user)) -> dict:
     return _enrich_cart(store.clear_cart(user.id))
 
 
+# ── favorites endpoints ────────────────────────────────────────────────
+
+class FavoriteRequest(BaseModel):
+    product_id: str
+
+
+def _enrich_favorites(favorites: list[dict]) -> list[dict]:
+    """为收藏项关联商品明细（商品不存在时跳过）。"""
+    enriched = []
+    for fav in favorites:
+        product = _agent.repository.by_id.get(fav["product_id"])
+        if product is None:
+            continue
+        enriched.append({**fav, "product": product.to_dict()})
+    return enriched
+
+
+@app.post("/favorites")
+async def add_favorite(body: FavoriteRequest, user: UserResponse = Depends(get_current_user)) -> dict:
+    if body.product_id not in _agent.repository.by_id:
+        raise HTTPException(status_code=404, detail="商品不存在")
+    store.add_favorite(user.id, body.product_id)
+    return {"favorites": _enrich_favorites(store.list_favorites(user.id))}
+
+
+@app.get("/favorites")
+async def list_favorites(user: UserResponse = Depends(get_current_user)) -> dict:
+    return {"favorites": _enrich_favorites(store.list_favorites(user.id))}
+
+
+@app.delete("/favorites/{product_id}")
+async def remove_favorite(product_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
+    store.remove_favorite(user.id, product_id)
+    return {"favorites": _enrich_favorites(store.list_favorites(user.id))}
+
+
 # ── order endpoints ────────────────────────────────────────────────────
 
 class OrderCreateRequest(BaseModel):
@@ -285,6 +321,22 @@ async def get_order(order_id: str, user: UserResponse = Depends(get_current_user
 async def cancel_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_order(store.cancel_order(user.id, order_id))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.post("/orders/{order_id}/ship")
+async def ship_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
+    try:
+        return _enrich_order(store.ship_order(user.id, order_id))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.post("/orders/{order_id}/deliver")
+async def deliver_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
+    try:
+        return _enrich_order(store.deliver_order(user.id, order_id))
     except store.StoreError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
