@@ -424,4 +424,18 @@ def delete_conversation(conversation_id: str) -> None:
     conn.close()
 
 
+def list_user_conversations(user_id: str) -> list[dict]:
+    """返回某用户的所有会话（id + 时间，用于历史会话列表）。"""
+    conn = _connection()
+    rows = conn.execute(
+        "SELECT conversation_id, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [
+        {"conversation_id": r["conversation_id"], "created_at": r["created_at"], "updated_at": r["updated_at"]}
+        for r in rows
+    ]
+
+
 init_db()

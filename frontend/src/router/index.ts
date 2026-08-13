@@ -10,12 +10,13 @@ export const router = createRouter({
     { path: '/cart', name: 'cart', component: () => import('../views/CartView.vue') },
     { path: '/favorites', name: 'favorites', component: () => import('../views/FavoritesView.vue') },
     { path: '/orders', name: 'orders', component: () => import('../views/OrdersView.vue') },
+    { path: '/history', name: 'history', component: () => import('../views/HistoryView.vue') },
     { path: '/admin', name: 'admin', component: () => import('../views/AdminView.vue') },
   ],
 })
 
 // 需要登录的页面：未登录跳转登录页，登录后回跳
-const authRequired = ['/cart', '/favorites', '/orders', '/admin']
+const authRequired = ['/cart', '/favorites', '/orders', '/history', '/admin']
 
 router.beforeEach((to) => {
   if (authRequired.includes(to.path)) {

@@ -47,5 +47,28 @@ export const useChatStore = defineStore('chat', () => {
     conversationId.value = await api.createConversation()
   }
 
-  return { conversationId, messages, loading, init, send, reset }
+  async function loadConversation(cid: string) {
+    const data: any = await api.getConversation(cid)
+    conversationId.value = cid
+    messages.value = []
+    for (const event of data.events || []) {
+      if (event.event_type === 'user_message') {
+        messages.value.push({ role: 'user', content: event.payload?.message || '' })
+      } else if (event.event_type === 'assistant_message') {
+        const r = event.payload?.result || {}
+        messages.value.push({
+          role: 'assistant',
+          content: r.summary || '',
+          responseType: r.response_type,
+          productId: r.purchased_product_id,
+          trace: r.trace,
+          products: r.catalog_data?.products || [],
+          alternatives: r.catalog_data?.alternatives || [],
+          guidance: r.proactive_guidance || null,
+        })
+      }
+    }
+  }
+
+  return { conversationId, messages, loading, init, send, reset, loadConversation }
 })

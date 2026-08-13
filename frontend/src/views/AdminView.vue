@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { adminOrders, adminShipOrder, adminDeliverOrder, adminUsers } from '../api'
+import { adminOrders, adminShipOrder, adminDeliverOrder, adminUsers, listProducts } from '../api'
 import { useRouter } from 'vue-router'
 
 const auth = useAuthStore()
 const router = useRouter()
 const orders = ref<any[]>([])
 const users = ref<any[]>([])
+const products = ref<any[]>([])
+const totalProducts = ref(0)
 const loading = ref(false)
-const tab = ref<'orders' | 'users'>('orders')
+const tab = ref<'orders' | 'users' | 'products'>('orders')
 
 const statusLabels: Record<string, { label: string; color: string }> = {
   confirmed: { label: '已确认', color: 'bg-emerald-50 text-emerald-600' },
@@ -24,6 +26,9 @@ async function load() {
   try {
     orders.value = await adminOrders()
     users.value = await adminUsers()
+    const prodData = await listProducts({ page: 1, page_size: 100 })
+    products.value = prodData.products
+    totalProducts.value = prodData.total
   } finally {
     loading.value = false
   }
@@ -55,6 +60,7 @@ onMounted(() => {
       <div class="flex gap-2 mb-6">
         <button @click="tab = 'orders'" :class="['px-4 py-2 rounded-full text-sm font-medium transition-colors cursor-pointer', tab === 'orders' ? 'bg-accent-500 text-white' : 'bg-surface text-ink-muted hover:bg-black/5']">订单管理</button>
         <button @click="tab = 'users'" :class="['px-4 py-2 rounded-full text-sm font-medium transition-colors cursor-pointer', tab === 'users' ? 'bg-accent-500 text-white' : 'bg-surface text-ink-muted hover:bg-black/5']">用户管理</button>
+        <button @click="tab = 'products'" :class="['px-4 py-2 rounded-full text-sm font-medium transition-colors cursor-pointer', tab === 'products' ? 'bg-accent-500 text-white' : 'bg-surface text-ink-muted hover:bg-black/5']">商品管理</button>
       </div>
 
       <!-- 订单管理 -->
@@ -104,6 +110,21 @@ onMounted(() => {
           </span>
         </div>
         <div v-if="!users.length && !loading" class="text-center py-16 text-ink-muted">暂无用户</div>
+      </div>
+
+      <!-- 商品管理 -->
+      <div v-else-if="tab === 'products'">
+        <p class="text-sm text-ink-muted mb-4">共 {{ totalProducts }} 件商品（显示前 100 件）</p>
+        <div class="space-y-2.5">
+          <div v-for="p in products" :key="p.product_id" class="bg-surface rounded-card shadow-soft p-4 flex items-center gap-4">
+            <img v-if="p.image" :src="`/images/${p.image}`" class="w-12 h-12 rounded-lg object-cover bg-gray-100" />
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium text-ink truncate">{{ p.name }}</div>
+              <div class="text-xs text-ink-muted">{{ p.product_id }} · {{ p.item_type }} · {{ p.manufacturer }}</div>
+            </div>
+            <div class="text-sm font-semibold text-ink">${{ p.price?.toFixed(2) }}</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

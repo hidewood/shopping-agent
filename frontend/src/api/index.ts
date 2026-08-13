@@ -117,6 +117,11 @@ export async function getConversation(cid: string): Promise<Record<string, unkno
   return r.data
 }
 
+export async function listConversations() {
+  const r = await api.get('/api/conversations')
+  return r.data
+}
+
 export async function listProducts(params: Record<string, string | number> = {}) {
   const r = await api.get('/api/products', { params })
   return r.data

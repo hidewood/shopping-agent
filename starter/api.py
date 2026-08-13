@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from starter import auth, store
-from starter.agent_interface import Agent, ConversationState
+from starter.agent_interface import Agent, ConversationState, PreferenceProfile
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_DIR / "data"
@@ -401,6 +401,11 @@ async def health() -> dict[str, Any]:
 
 # ── conversations ──────────────────────────────────────────────────────
 
+@app.get("/api/conversations")
+async def list_conversations(user: UserResponse = Depends(get_current_user)) -> list[dict]:
+    return store.list_user_conversations(user.id)
+
+
 @app.post("/api/conversations")
 async def create_conversation(user: UserResponse | None = Depends(optional_user)) -> dict[str, str]:
     state = ConversationState()
@@ -417,12 +422,25 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
     return data
 
 
+def _sync_favorites_profile(state: ConversationState, user_id: str | None) -> None:
+    """把登录用户的收藏重建为排序偏好信号（厂商/标签/类型的 affinity 计数）。"""
+    if user_id is None:
+        return
+    profile = PreferenceProfile()
+    for fav in store.list_favorites(user_id):
+        product = _agent.repository.by_id.get(fav["product_id"])
+        if product is not None:
+            profile.record_product(product, signal="favorite")
+    state.preference_profile = profile
+
+
 @app.post("/api/conversations/{conversation_id}/messages")
 async def send_message(conversation_id: str, body: MessageRequest, user: UserResponse | None = Depends(optional_user)) -> TurnResponse:
     data = store.load_conversation(conversation_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     state = ConversationState.from_dict(data)
+    _sync_favorites_profile(state, user.id if user else None)
     result = _agent.run_turn(body.message, state)
     store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
     catalog = result.get("catalog_data") or {}
