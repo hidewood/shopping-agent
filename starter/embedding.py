@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
+DEFAULT_MODEL = "BAAI/bge-large-zh-v1.5"
 
 
 class EmbeddingIndex:
