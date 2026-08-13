@@ -27,7 +27,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from starter import auth, store
+from starter import auth, catalog, store
 from starter.agent_interface import Agent, ConversationState, PreferenceProfile
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -385,6 +385,53 @@ async def admin_deliver(order_id: str, _: UserResponse = Depends(require_admin))
 @app.get("/admin/users")
 async def admin_users(_: UserResponse = Depends(require_admin)) -> list[dict]:
     return auth.list_users()
+
+
+# ── admin product management ───────────────────────────────────────────
+
+class ProductUpsert(BaseModel):
+    name: str
+    item_type: str
+    manufacturer: str
+    price: float
+    tags: list[str] = []
+    description: str = ""
+
+
+def _reload_agent() -> None:
+    """商品目录写回后刷新内存 repository。"""
+    global _agent
+    _agent = Agent(DATA_DIR)
+
+
+@app.post("/admin/products")
+async def admin_create_product(body: ProductUpsert, _: UserResponse = Depends(require_admin)) -> dict:
+    try:
+        product = catalog.create_product(body.model_dump())
+    except (catalog.CatalogError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    _reload_agent()
+    return product
+
+
+@app.patch("/admin/products/{product_id}")
+async def admin_update_product(product_id: str, body: ProductUpsert, _: UserResponse = Depends(require_admin)) -> dict:
+    try:
+        product = catalog.update_product(product_id, body.model_dump())
+    except (catalog.CatalogError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    _reload_agent()
+    return product
+
+
+@app.delete("/admin/products/{product_id}")
+async def admin_delete_product(product_id: str, _: UserResponse = Depends(require_admin)) -> dict:
+    try:
+        catalog.delete_product(product_id)
+    except catalog.CatalogError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    _reload_agent()
+    return {"deleted": product_id}
 
 
 # ── health ─────────────────────────────────────────────────────────────

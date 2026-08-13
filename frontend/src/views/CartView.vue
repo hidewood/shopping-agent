@@ -55,7 +55,7 @@ onMounted(load)
       <div v-else class="space-y-3">
         <div v-for="item in cart?.items" :key="item.id" class="bg-surface rounded-card shadow-soft p-4 flex items-center gap-4">
           <img v-if="item.product?.image" :src="`/images/${item.product.image}`" class="w-16 h-16 rounded-xl object-cover bg-gray-100" />
-          <div v-else class="w-16 h-16 rounded-xl bg-gray-100 flex items-center justify-center text-2xl">🛍️</div>
+          <div v-else class="w-16 h-16 rounded-xl bg-gray-100 flex items-center justify-center"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#D1D5DB" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></div>
           <div class="flex-1 min-w-0">
             <div class="font-medium text-ink text-sm truncate">{{ item.product?.name }}</div>
             <div class="text-ink-muted text-xs">{{ item.product?.product_id }}</div>

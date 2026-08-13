@@ -163,3 +163,18 @@ export async function adminUsers() {
   const r = await api.get('/admin/users')
   return r.data
 }
+
+export async function adminCreateProduct(data: Record<string, any>) {
+  const r = await api.post('/admin/products', data)
+  return r.data
+}
+
+export async function adminUpdateProduct(productId: string, data: Record<string, any>) {
+  const r = await api.patch(`/admin/products/${productId}`, data)
+  return r.data
+}
+
+export async function adminDeleteProduct(productId: string) {
+  const r = await api.delete(`/admin/products/${productId}`)
+  return r.data
+}
