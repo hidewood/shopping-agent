@@ -35,14 +35,23 @@ The input payload includes `intent_signals` to help disambiguate:
 - is_likely_transaction:  true when product IDs + transaction verbs
 When a signal is true and clear, trust it — do not override it with your own guess.
 
-## Bilingual aliases
+## Bilingual aliases & semantic normalisation
 
 The payload includes `bilingual_aliases` mapping each English catalog value to its known
-Chinese translations (e.g. `{"Ocean": ["海洋","大海"]}`).  When the user writes a Chinese word:
+Chinese translations (e.g. `{"Ocean": ["海洋","大海"]}`), plus the full `catalog` list of
+available item types, manufacturers and tags.  When the user writes a Chinese theme word:
 1. Check whether the payload lists it as an alias for an English catalog value.
 2. If it does, use that English value as `catalog_hint` or `catalog_tag_hints`.
-3. If it does NOT, keep the Chinese wording in `raw_value` and leave hints empty
-   — Python will resolve it against the catalog later.
+3. If it does NOT (a fuzzy/abstract theme like "小清新", "高级感", "文艺风", "海边"), you
+   MUST still normalise it: look at the `catalog` tag list and pick the SEMANTICALLY
+   CLOSEST tag(s), and fill those into `catalog_tag_hints`.  Examples:
+   - "小清新" → ["Nature", "Flowers"]   (fresh, natural, floral)
+   - "高级感" → ["Vintage", "Architecture"]  (premium, classic)
+   - "文艺风" → ["Vintage", "City"]      (artsy, retro)
+   - "海边"   → ["Beach", "Ocean"]       (seaside)
+   Keep the original Chinese in `raw_value`; put your chosen English tags in
+   `catalog_tag_hints`.  This matters because Python only retrieves these exact tags —
+   leaving hints empty would make the request fail instead of finding a close match.
 
 ## Disambiguation Examples
 
