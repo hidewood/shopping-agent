@@ -66,6 +66,12 @@ def init_db() -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, product_id)
         );
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id           TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            preference   TEXT NOT NULL,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS conversations (
             conversation_id TEXT PRIMARY KEY,
             user_id         TEXT,
@@ -198,6 +204,33 @@ def list_favorites(user_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [{"product_id": r["product_id"], "created_at": r["created_at"]} for r in rows]
+
+
+# ── user semantic preferences ─────────────────────────────────────────
+
+def add_preference(user_id: str, preference: str) -> None:
+    """记录用户对话中表达的语义偏好（如"清新风格"），幂等。"""
+    preference = preference.strip()
+    if not preference:
+        return
+    conn = _connection()
+    conn.execute(
+        "INSERT OR IGNORE INTO user_preferences (id, user_id, preference) VALUES (?, ?, ?)",
+        (uuid.uuid4().hex, user_id, preference),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_preferences(user_id: str) -> list[str]:
+    """返回用户的语义偏好列表（最近的在前）。"""
+    conn = _connection()
+    rows = conn.execute(
+        "SELECT preference FROM user_preferences WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [r["preference"] for r in rows]
 
 
 # ── orders ─────────────────────────────────────────────────────────────

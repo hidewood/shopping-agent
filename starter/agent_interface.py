@@ -5547,7 +5547,11 @@ class ShoppingAgent:
     def _recent_conversation_messages(
         self, state: ConversationState, limit: int | None = None
     ) -> list[dict[str, str]]:
-        """Send semantic conversation context, excluding transient operational failures."""
+        """Send semantic conversation context, excluding transient operational failures.
+
+        当消息超过 history_limit 时，把最老的用户消息压缩成一行摘要（不额外调用
+        LLM），避免长对话上下文爆炸的同时不丢失早期意图。
+        """
         messages: list[dict[str, str]] = []
         for event in state.events:
             if event.event_type == "user_message":
@@ -5558,7 +5562,14 @@ class ShoppingAgent:
                     continue
                 messages.append({"role": "assistant", "content": str(result.get("summary", ""))})
         history_limit = limit or self.language_config.recent_conversation_messages
-        return messages[-history_limit:]
+        if len(messages) <= history_limit:
+            return messages
+        recent = messages[-history_limit:]
+        older_user = [m["content"] for m in messages[:-history_limit] if m["role"] == "user"]
+        if older_user:
+            summary = "对话早期，用户曾提到：" + "；".join(older_user[:5])
+            return [{"role": "user", "content": summary}] + recent
+        return recent
 
     @staticmethod
     def _clear_generic_item_type(requirement: ShoppingRequirement) -> None:

@@ -470,15 +470,34 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
 
 
 def _sync_favorites_profile(state: ConversationState, user_id: str | None) -> None:
-    """把登录用户的收藏重建为排序偏好信号（厂商/标签/类型的 affinity 计数）。"""
+    """把登录用户的收藏 + 历史语义偏好重建为排序偏好信号。"""
     if user_id is None:
         return
     profile = PreferenceProfile()
+    # 收藏的精确标签/厂商/类型
     for fav in store.list_favorites(user_id):
         product = _agent.repository.by_id.get(fav["product_id"])
         if product is not None:
             profile.record_product(product, signal="favorite")
+    # 历史语义偏好：用 embedding 映射到目录标签，计入偏好（弱信号）
+    idx = _agent.repository._embedding_index
+    if idx is not None and idx.available:
+        for pref in store.list_preferences(user_id):
+            for tag, _sim in idx.search(pref, threshold=0.5):
+                profile.tag_affinity[tag] = min(12, profile.tag_affinity.get(tag, 0) + 1)
     state.preference_profile = profile
+
+
+def _record_semantic_preferences(result: dict, user_id: str | None) -> None:
+    """从 trace 提取用户表达的语义偏好（未映射到标签的 preference），持久化。"""
+    if user_id is None:
+        return
+    for step in result.get("trace", []):
+        if step.get("step") != "catalog_grounding":
+            continue
+        grounded = step.get("grounded_requirements") or {}
+        for pref in grounded.get("semantic_preferences", []):
+            store.add_preference(user_id, str(pref))
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
@@ -489,6 +508,7 @@ async def send_message(conversation_id: str, body: MessageRequest, user: UserRes
     state = ConversationState.from_dict(data)
     _sync_favorites_profile(state, user.id if user else None)
     result = _agent.run_turn(body.message, state)
+    _record_semantic_preferences(result, user.id if user else None)
     store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
     catalog = result.get("catalog_data") or {}
     return TurnResponse(
