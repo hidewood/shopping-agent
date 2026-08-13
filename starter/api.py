@@ -99,6 +99,7 @@ _agent = Agent(DATA_DIR)
 
 class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User message text")
+    mode: str = Field(default="turn_plan", description="turn_plan（结构化推荐）| react（深度对话多步推理）")
 
 
 class TurnResponse(BaseModel):
@@ -507,6 +508,20 @@ async def send_message(conversation_id: str, body: MessageRequest, user: UserRes
         raise HTTPException(status_code=404, detail="Conversation not found")
     state = ConversationState.from_dict(data)
     _sync_favorites_profile(state, user.id if user else None)
+
+    if body.mode == "react":
+        # ReAct 模式：LangGraph 多步推理（工具调用循环），返回纯文本回答
+        from starter.graph import run_react
+        result = run_react(_agent, body.message, state)
+        store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
+        return TurnResponse(
+            conversation_id=conversation_id,
+            response_type=result.get("response_type", "chat"),
+            summary=result.get("summary", ""),
+            purchased_product_id=result.get("purchased_product_id"),
+            trace=result.get("trace", []),
+        )
+
     result = _agent.run_turn(body.message, state)
     _record_semantic_preferences(result, user.id if user else None)
     store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))

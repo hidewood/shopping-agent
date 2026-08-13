@@ -94,19 +94,33 @@ const examples = [
 
     <!-- 底部输入框（有消息时） -->
     <div v-if="store.messages.length" class="border-t border-white/60 bg-white/70 backdrop-blur-xl px-6 py-4">
-      <div class="max-w-3xl mx-auto flex items-center gap-3">
-        <input
-          v-model="input"
-          @keydown.enter="handleSend"
-          :disabled="store.loading"
-          placeholder="继续描述需求……"
-          class="flex-1 text-[14px] bg-surface rounded-input border border-hairline px-4 py-2.5 focus:outline-none focus:border-accent-400 focus:ring-4 focus:ring-accent-100 disabled:opacity-50 transition-all"
-        />
-        <button
-          @click="handleSend"
-          :disabled="!input.trim() || store.loading"
-          class="shrink-0 px-5 py-2.5 rounded-full bg-accent-500 text-white text-sm font-medium hover:bg-accent-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
-        >发送</button>
+      <div class="max-w-3xl mx-auto">
+        <!-- 模式切换 -->
+        <div class="flex items-center gap-2 mb-2">
+          <button
+            @click="store.mode = 'turn_plan'"
+            :class="['text-xs px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer', store.mode === 'turn_plan' ? 'bg-accent-500 text-white' : 'bg-surface text-ink-muted hover:bg-black/5']"
+          >智能推荐</button>
+          <button
+            @click="store.mode = 'react'"
+            :class="['text-xs px-3 py-1.5 rounded-full font-medium transition-colors cursor-pointer', store.mode === 'react' ? 'bg-accent-500 text-white' : 'bg-surface text-ink-muted hover:bg-black/5']"
+          >深度对话</button>
+          <span class="text-xs text-ink-faint ml-1">{{ store.mode === 'turn_plan' ? '结构化商品推荐' : '多步推理自由对话' }}</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <input
+            v-model="input"
+            @keydown.enter="handleSend"
+            :disabled="store.loading"
+            placeholder="继续描述需求……"
+            class="flex-1 text-[14px] bg-surface rounded-input border border-hairline px-4 py-2.5 focus:outline-none focus:border-accent-400 focus:ring-4 focus:ring-accent-100 disabled:opacity-50 transition-all"
+          />
+          <button
+            @click="handleSend"
+            :disabled="!input.trim() || store.loading"
+            class="shrink-0 px-5 py-2.5 rounded-full bg-accent-500 text-white text-sm font-medium hover:bg-accent-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
+          >发送</button>
+        </div>
       </div>
     </div>
   </div>
