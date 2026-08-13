@@ -30,7 +30,7 @@ function handleClick() {
       <div v-else class="w-full h-full flex items-center justify-center bg-gray-100">
         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#D1D5DB" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
       </div>
-      <span v-if="variant === 'primary'" class="absolute top-3 left-3 text-[11px] bg-brand-500 text-white px-2.5 py-1 rounded-full font-medium">推荐</span>
+      <span v-if="variant === 'primary'" class="absolute top-3 left-3 text-[11px] bg-accent-500 text-white px-2.5 py-1 rounded-full font-medium">推荐</span>
     </div>
 
     <!-- Body -->

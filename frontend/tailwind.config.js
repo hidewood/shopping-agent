@@ -14,6 +14,7 @@ export default {
           faint: '#8E8E93',
         },
         hairline: '#E5E5EA',
+        // 用户气泡专用紫色
         brand: {
           50: '#F5F3FF',
           100: '#EDE9FE',
@@ -22,6 +23,16 @@ export default {
           500: '#8B5CF6',
           600: '#7C3AED',
           700: '#6D28D9',
+        },
+        // Apple 系统蓝 — 用于图标选中态、CTA、发送按钮等
+        accent: {
+          50: '#F0F7FF',
+          100: '#E0EFFF',
+          200: '#BFE0FF',
+          400: '#3399FF',
+          500: '#007AFF',
+          600: '#0066D6',
+          700: '#0055B8',
         },
       },
       borderRadius: {

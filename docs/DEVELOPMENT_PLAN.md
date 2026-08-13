@@ -346,14 +346,17 @@ Trace 消费者必须处理所有这些不同的结构，使 trace schema 不均
 | 真实 API 全量测试 | ✅ | 63 条，service_error 从 10→4 条 |
 | 模型切换 | ✅ | deepseek-v4-flash → deepseek-v4-pro |
 
-### Phase 7: 待办
+### Phase 7: 待办与进度
 
-| 任务 | 优先级 |
-|---|---|
-| 登录/购物车/订单实现（按 feature-plan 文档） | P1 |
-| 前端毛玻璃（Liquid Glass）加强 | P2 |
-| 补鲁棒性容错的单元测试 | P2 |
-| 推送到 GitHub 新分支 | P0 |
+| 任务 | 状态 | 备注 |
+|---|---|---|
+| 推送到 GitHub 新分支 | ✅ | `agent-v2` 已推送 |
+| 前端毛玻璃（Liquid Glass）加强 | ✅ | 侧栏/详情栏/输入框 backdrop-blur |
+| 补鲁棒性容错的单元测试 | ✅ | `tests/test_robustness.py` 11 个测试 |
+| 登录/购物车/订单 - 阶段A 认证 | ✅ | `starter/auth.py` + `/auth/*` 端点（register/login/me） |
+| 登录/购物车/订单 - 阶段B 购物车 | ✅ | `starter/store.py` + `/cart/*` 端点 |
+| 登录/购物车/订单 - 阶段C 订单 | ✅ | orders 表 + 状态机 + `/orders/*` 端点 |
+| 登录/购物车/订单 - 阶段D 前端 | ✅ | LoginView + CartView + OrdersView + 侧栏登录入口 |
 
 ---
 

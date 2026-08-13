@@ -57,10 +57,10 @@ const imageUrl = computed(() => {
 
       <!-- 推荐理由 -->
       <div v-if="reason?.length" class="border-t border-hairline pt-4 mb-5">
-        <div class="text-[12px] font-semibold text-brand-600 mb-2.5">为什么适合你</div>
+        <div class="text-[12px] font-semibold text-accent-600 mb-2.5">为什么适合你</div>
         <ul class="space-y-2">
           <li v-for="r in reason" :key="r" class="flex items-start gap-2 text-sm text-ink-soft">
-            <span class="text-brand-500 mt-0.5 shrink-0">
+            <span class="text-accent-500 mt-0.5 shrink-0">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
             </span>
             <span>{{ r }}</span>
@@ -74,7 +74,7 @@ const imageUrl = computed(() => {
       </p>
 
       <!-- CTA -->
-      <button class="w-full py-3.5 rounded-full bg-brand-500 text-white text-[15px] font-semibold hover:bg-brand-600 transition-colors cursor-pointer">
+      <button class="w-full py-3.5 rounded-full bg-accent-500 text-white text-[15px] font-semibold hover:bg-accent-700 transition-colors cursor-pointer">
         加入购物车
       </button>
     </div>

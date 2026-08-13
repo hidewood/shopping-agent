@@ -43,7 +43,7 @@ const examples = [
 
         <!-- 大输入框 -->
         <div class="w-full max-w-xl mb-6">
-          <div class="flex items-center gap-2 bg-surface rounded-input border border-hairline shadow-soft px-5 py-4 focus-within:border-brand-400 focus-within:ring-4 focus-within:ring-brand-100 transition-all">
+          <div class="flex items-center gap-2 bg-surface rounded-input border border-hairline shadow-soft px-5 py-4 focus-within:border-accent-400 focus-within:ring-4 focus-within:ring-accent-100 transition-all">
             <input
               v-model="input"
               @keydown.enter="handleSend"
@@ -53,7 +53,7 @@ const examples = [
             <button
               @click="handleSend"
               :disabled="!input.trim()"
-              class="shrink-0 w-9 h-9 rounded-full bg-brand-500 text-white flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:bg-brand-600 transition-colors cursor-pointer"
+              class="shrink-0 w-9 h-9 rounded-full bg-accent-500 text-white flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:bg-accent-700 transition-colors cursor-pointer"
               title="发送"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M1 8l7-7 7 7" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -67,7 +67,7 @@ const examples = [
             v-for="ex in examples"
             :key="ex"
             @click="input = ex; handleSend()"
-            class="text-[13px] px-4 py-2 rounded-full border border-hairline bg-surface text-ink-muted hover:border-brand-300 hover:text-brand-600 transition-all cursor-pointer"
+            class="text-[13px] px-4 py-2 rounded-full border border-hairline bg-surface text-ink-muted hover:border-accent-300 hover:text-accent-600 transition-all cursor-pointer"
           >
             {{ ex }}
           </button>
@@ -83,9 +83,9 @@ const examples = [
         <!-- Loading -->
         <div v-if="store.loading" class="flex items-center gap-2.5 text-ink-muted">
           <div class="flex gap-1">
-            <span class="w-1.5 h-1.5 rounded-full bg-brand-400 animate-bounce" style="animation-delay: 0ms"></span>
-            <span class="w-1.5 h-1.5 rounded-full bg-brand-400 animate-bounce" style="animation-delay: 150ms"></span>
-            <span class="w-1.5 h-1.5 rounded-full bg-brand-400 animate-bounce" style="animation-delay: 300ms"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-accent-400 animate-bounce" style="animation-delay: 0ms"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-accent-400 animate-bounce" style="animation-delay: 150ms"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-accent-400 animate-bounce" style="animation-delay: 300ms"></span>
           </div>
           <span class="text-sm">正在为你挑选…</span>
         </div>
@@ -100,12 +100,12 @@ const examples = [
           @keydown.enter="handleSend"
           :disabled="store.loading"
           placeholder="继续描述需求……"
-          class="flex-1 text-[14px] bg-surface rounded-input border border-hairline px-4 py-2.5 focus:outline-none focus:border-brand-400 focus:ring-4 focus:ring-brand-100 disabled:opacity-50 transition-all"
+          class="flex-1 text-[14px] bg-surface rounded-input border border-hairline px-4 py-2.5 focus:outline-none focus:border-accent-400 focus:ring-4 focus:ring-accent-100 disabled:opacity-50 transition-all"
         />
         <button
           @click="handleSend"
           :disabled="!input.trim() || store.loading"
-          class="shrink-0 px-5 py-2.5 rounded-full bg-brand-500 text-white text-sm font-medium hover:bg-brand-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
+          class="shrink-0 px-5 py-2.5 rounded-full bg-accent-500 text-white text-sm font-medium hover:bg-accent-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
         >发送</button>
       </div>
     </div>

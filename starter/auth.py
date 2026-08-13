@@ -1,0 +1,120 @@
+"""User authentication: SQLite users table + JWT + bcrypt password hashing.
+
+MVP 阶段用 SQLite + 标准库 sqlite3，后续可平滑迁移 PostgreSQL（换连接即可）。
+用户数据存 ``local_state/users.db``（gitignored，不提交）。
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import jwt
+from passlib.context import CryptContext
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+DB_PATH = PROJECT_DIR / "local_state" / "users.db"
+
+# JWT 配置（生产环境应从 .env 读取强随机密钥）
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-me-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+class AuthError(Exception):
+    """Raised when a credential or token is invalid."""
+
+
+def _connection() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    conn = _connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id            TEXT PRIMARY KEY,
+            email         TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            name          TEXT,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _hash_password(password: str) -> str:
+    return _pwd_context.hash(password)
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    return _pwd_context.verify(password, password_hash)
+
+
+def create_user(email: str, password: str, name: str | None = None) -> dict:
+    """Create a user.  Raises AuthError if the email is already taken."""
+    email = email.strip().lower()
+    if not email or not password:
+        raise AuthError("邮箱和密码不能为空")
+    user_id = uuid.uuid4().hex
+    conn = _connection()
+    try:
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)",
+            (user_id, email, _hash_password(password), name),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise AuthError("该邮箱已注册") from None
+    finally:
+        conn.close()
+    return {"id": user_id, "email": email, "name": name}
+
+
+def authenticate_user(email: str, password: str) -> dict:
+    """Verify credentials and return the user dict, or raise AuthError."""
+    email = email.strip().lower()
+    conn = _connection()
+    row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    conn.close()
+    if row is None or not _verify_password(password, row["password_hash"]):
+        raise AuthError("邮箱或密码错误")
+    return {"id": row["id"], "email": row["email"], "name": row["name"]}
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    conn = _connection()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {"id": row["id"], "email": row["email"], "name": row["name"]}
+
+
+def create_access_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": user_id, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> str:
+    """Decode a token and return the user_id, or raise AuthError."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload["sub"]
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, KeyError):
+        raise AuthError("无效或过期的令牌") from None
+
+
+init_db()

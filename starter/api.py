@@ -20,11 +20,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from starter import auth, store
 from starter.agent_interface import Agent, ConversationState
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -109,6 +111,182 @@ class TurnResponse(BaseModel):
     products: list[dict[str, Any]] = []
     alternatives: list[dict[str, Any]] = []
     guidance: dict[str, Any] | None = None
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., description="Email address")
+    password: str = Field(..., min_length=6, description="Password (min 6 chars)")
+    name: str | None = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: str | None = None
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+# ── auth helpers ───────────────────────────────────────────────────────
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> UserResponse:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="未提供认证令牌")
+    try:
+        user_id = auth.decode_access_token(credentials.credentials)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from None
+    user = auth.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return UserResponse(**user)
+
+
+# ── auth endpoints ─────────────────────────────────────────────────────
+
+@app.post("/auth/register", response_model=TokenResponse)
+async def register(body: RegisterRequest) -> TokenResponse:
+    try:
+        user = auth.create_user(body.email, body.password, body.name)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    token = auth.create_access_token(user["id"])
+    return TokenResponse(access_token=token, user=UserResponse(**user))
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(body: LoginRequest) -> TokenResponse:
+    try:
+        user = auth.authenticate_user(body.email, body.password)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from None
+    token = auth.create_access_token(user["id"])
+    return TokenResponse(access_token=token, user=UserResponse(**user))
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def me(user: UserResponse = Depends(get_current_user)) -> UserResponse:
+    return user
+
+
+# ── cart endpoints ─────────────────────────────────────────────────────
+
+class CartItemRequest(BaseModel):
+    product_id: str
+    quantity: int = Field(default=1, ge=1, le=99)
+
+
+class CartItemUpdate(BaseModel):
+    quantity: int = Field(..., ge=1, le=99)
+
+
+def _enrich_cart(cart: dict) -> dict:
+    """Attach product details to cart line items."""
+    items = []
+    total = 0.0
+    for item in cart["items"]:
+        product = _agent.repository.by_id.get(item["product_id"])
+        if product is None:
+            continue
+        total += product.price * item["quantity"]
+        items.append({**item, "product": product.to_dict()})
+    return {"cart_id": cart["cart_id"], "items": items, "total_price": round(total, 2)}
+
+
+@app.get("/cart")
+async def get_cart(user: UserResponse = Depends(get_current_user)) -> dict:
+    return _enrich_cart(store.get_cart(user.id))
+
+
+@app.post("/cart/items")
+async def add_cart_item(body: CartItemRequest, user: UserResponse = Depends(get_current_user)) -> dict:
+    if body.product_id not in _agent.repository.by_id:
+        raise HTTPException(status_code=404, detail="商品不存在")
+    return _enrich_cart(store.add_cart_item(user.id, body.product_id, body.quantity))
+
+
+@app.patch("/cart/items/{item_id}")
+async def update_cart_item(item_id: str, body: CartItemUpdate, user: UserResponse = Depends(get_current_user)) -> dict:
+    try:
+        return _enrich_cart(store.update_cart_item(user.id, item_id, body.quantity))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.delete("/cart/items/{item_id}")
+async def remove_cart_item(item_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
+    return _enrich_cart(store.remove_cart_item(user.id, item_id))
+
+
+@app.delete("/cart")
+async def clear_cart(user: UserResponse = Depends(get_current_user)) -> dict:
+    return _enrich_cart(store.clear_cart(user.id))
+
+
+# ── order endpoints ────────────────────────────────────────────────────
+
+class OrderCreateRequest(BaseModel):
+    cart_id: str | None = None
+
+
+def _enrich_order(order: dict) -> dict:
+    """Attach product details to order line items."""
+    items = []
+    for item in order["items"]:
+        product = _agent.repository.by_id.get(item["product_id"])
+        items.append({**item, "product": product.to_dict() if product else None})
+    return {**order, "items": items}
+
+
+@app.post("/orders")
+async def create_order(body: OrderCreateRequest, user: UserResponse = Depends(get_current_user)) -> dict:
+    cart = store.get_cart(user.id)
+    lines = []
+    for item in cart["items"]:
+        product = _agent.repository.by_id.get(item["product_id"])
+        if product is None:
+            continue
+        lines.append({"product_id": item["product_id"], "quantity": item["quantity"], "price": product.price})
+    try:
+        order = store.create_order(user.id, lines)
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    # 下单后清空购物车
+    store.clear_cart(user.id)
+    return _enrich_order(order)
+
+
+@app.get("/orders")
+async def list_orders(user: UserResponse = Depends(get_current_user)) -> list[dict]:
+    return [_enrich_order(o) for o in store.list_orders(user.id)]
+
+
+@app.get("/orders/{order_id}")
+async def get_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
+    try:
+        return _enrich_order(store.get_order(user.id, order_id))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@app.post("/orders/{order_id}/cancel")
+async def cancel_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
+    try:
+        return _enrich_order(store.cancel_order(user.id, order_id))
+    except store.StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 # ── health ─────────────────────────────────────────────────────────────

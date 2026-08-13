@@ -53,12 +53,12 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize))
           <input
             v-model="query"
             placeholder="搜索名称、厂商、标签或描述"
-            class="w-full pl-11 pr-4 py-2.5 rounded-input border border-hairline bg-surface text-sm focus:outline-none focus:border-brand-400 focus:ring-4 focus:ring-brand-100"
+            class="w-full pl-11 pr-4 py-2.5 rounded-input border border-hairline bg-surface text-sm focus:outline-none focus:border-accent-400 focus:ring-4 focus:ring-accent-100"
           />
         </div>
         <select
           v-model="itemType"
-          class="px-4 py-2.5 rounded-input border border-hairline bg-surface text-sm focus:outline-none focus:border-brand-400 min-w-[140px]"
+          class="px-4 py-2.5 rounded-input border border-hairline bg-surface text-sm focus:outline-none focus:border-accent-400 min-w-[140px]"
         >
           <option value="">全部类型</option>
           <option v-for="t in itemTypes" :key="t" :value="t">{{ t }}</option>
