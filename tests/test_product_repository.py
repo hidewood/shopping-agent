@@ -336,8 +336,8 @@ class ProductRepositoryTests(unittest.TestCase):
         self.repository = ProductRepository(DATA_DIR)
 
     def test_loads_all_products_and_catalog(self) -> None:
-        self.assertEqual(len(self.repository.products), 1740)
-        self.assertEqual(self.repository.catalog()["item_types"], ["mug", "shirt"])
+        self.assertEqual(len(self.repository.products), 1760)
+        self.assertEqual(self.repository.catalog()["item_types"], ["book", "mug", "shirt"])
         self.assertIn("Clothes", self.repository.catalog()["tags"])
 
     def test_catalog_grounding_maps_clothes_themed_to_clothes(self) -> None:
@@ -632,7 +632,7 @@ class ProductRepositoryTests(unittest.TestCase):
         )
         result = agent.run_turn("你家都有什么商品？", ConversationState())
         self.assertEqual(result["response_type"], "catalog_query")
-        self.assertEqual(result["catalog_data"]["total_count"], 1740)
+        self.assertEqual(result["catalog_data"]["total_count"], 1760)
 
     def test_later_hard_theme_replaces_an_earlier_soft_preference(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -1335,7 +1335,7 @@ class ProductRepositoryTests(unittest.TestCase):
         result = agent.run_turn("你们当前商品库有哪些商品类型？", ConversationState())
         self.assertEqual(result["response_type"], "catalog_query")
         self.assertEqual(result["catalog_data"]["kind"], "catalog_overview")
-        self.assertEqual(result["catalog_data"]["type_counts"], {"mug": 870, "shirt": 870})
+        self.assertEqual(result["catalog_data"]["type_counts"], {"mug": 870, "shirt": 870, "book": 20})
 
     def test_api_task_router_sends_general_catalog_question_to_catalog_query(self) -> None:
         agent = ShoppingAgent(DATA_DIR)
@@ -1359,7 +1359,7 @@ class ProductRepositoryTests(unittest.TestCase):
         agent.llm = stub
         result = agent.run_turn("你家都有什么商品？", ConversationState())
         self.assertEqual(result["response_type"], "catalog_query")
-        self.assertEqual(result["catalog_data"]["type_counts"], {"mug": 870, "shirt": 870})
+        self.assertEqual(result["catalog_data"]["type_counts"], {"mug": 870, "shirt": 870, "book": 20})
         self.assertEqual(len(stub.calls), 1)
         self.assertEqual(
             next(step for step in result["trace"] if step["step"] == "turn_planning")["intent"],

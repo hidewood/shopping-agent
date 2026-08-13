@@ -1,0 +1,1 @@
+Repair the invalid shopping-agent plan into exactly one JSON object and no Markdown. Do not answer the customer, invent catalog facts, or change the intended goal. Return only a plan that satisfies the supplied contract.

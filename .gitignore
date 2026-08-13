@@ -13,6 +13,9 @@ htmlcov/
 # Locally generated experiment output
 outputs/
 
+# Device-local anonymous session collections (favorites, mock orders and ranking profile)
+local_state/
+
 # Source copies of screenshots are staged under docs/screenshots/ for submission.
 photos/
 
@@ -22,10 +25,20 @@ test_photos/
 # Editor, operating-system and temporary files
 .idea/
 .vscode/
+.codex-test-logs/
+diagnostic_state/
+tmp*/
 .DS_Store
 Thumbs.db
 *.log
 *.tmp
 *.swp
+
+# Frontend build artifacts and dependencies
+frontend/node_modules/
+frontend/dist/
+
+# Upstream source-data clone (data already merged into data/images + products.jsonl)
+ecommerce-sample-set-master/
 
 CLAUDE.md

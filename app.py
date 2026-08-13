@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -12,29 +13,53 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / "data"
 PAGE_SIZE = 12
 AGENT_IMPLEMENTATION_VERSION = str((PROJECT_DIR / "starter" / "agent_interface.py").stat().st_mtime_ns)
+
+# Design tokens — single source of truth for all colours and spacing.
+THEME = {
+    "bg": "#f5f8fc",
+    "text": "#17385f",
+    "primary": "#1d61aa",
+    "primary_light": "#2479d0",
+    "accent_bg": "#eaf4ff",
+    "card_bg": "#ffffff",
+    "card_border": "#bed6ee",
+    "muted": "#6d8098",
+    "radius": "13px",
+    "shadow": "0 3px 13px rgba(25,86,157,.07)",
+}
+
+
 def apply_style() -> None:
+    # Use Streamlit's config API for stable settings; keep only custom CSS here.
     st.markdown(
-        """
+        f"""
         <style>
-          .stApp { background: #f5f8fc; color: #17385f; }
-          header[data-testid="stHeader"] { background: rgba(245,248,252,.94); }
-          .block-container { max-width: 1220px; padding-top: 1.35rem; padding-bottom: 3rem; }
-          .hero { background: linear-gradient(110deg, #edf6ff, #ffffff 64%, #e0f0ff); border: 1px solid #c8def4; border-radius: 16px; padding: 22px 30px; margin-bottom: 1.1rem; }
-          .hero h1 { color: #17549b; margin: 0; font-size: 2rem; }
-          .hero p { color: #577693; margin: .4rem 0 0; }
-          .section-title { border-left: 5px solid #2479d0; color: #1b5695; padding-left: 10px; font-size: 1.1rem; font-weight: 750; margin: .25rem 0 .85rem; }
-          .result-card, .alternative-card { background: #ffffff; border: 1px solid #bed6ee; border-radius: 13px; padding: 16px 18px; box-shadow: 0 3px 13px rgba(25,86,157,.07); }
-          .alternative-card { min-height: 188px; box-shadow: none; }
-          .price { color: #1264b8; font-size: 1.55rem; font-weight: 750; margin: .05rem 0 .55rem; }
-          .tag { display: inline-block; color: #2264a6; background: #eaf4ff; border: 1px solid #cce2f7; border-radius: 99px; padding: .16rem .5rem; margin: 0 .28rem .28rem 0; font-size: .82rem; }
-          .muted { color: #6d8098; font-size: .9rem; }
-          .summary-box { background: #eaf4ff; border-left: 4px solid #2376c9; border-radius: 6px; padding: .8rem 1rem; color: #174b83; margin-top: .85rem; }
-          div[data-testid="stTextArea"] textarea { border: 1px solid #b8cde6; border-radius: 9px; }
-          div[data-testid="stButton"] > button { background: #1d61aa; color: #fff; border: 1px solid #1d61aa; border-radius: 7px; font-weight: 600; }
-          div[data-testid="stButton"] > button:hover { background: #174f8a; border-color: #174f8a; color: #fff; }
-          button[data-baseweb="tab"] { color: #4a6d90; font-size: 1rem; font-weight: 650; }
-          button[data-baseweb="tab"][aria-selected="true"] { color: #175aa1; }
-          div[data-testid="stExpander"] { background: #fff; border: 1px solid #d4e2f0; border-radius: 9px; }
+          .stApp {{ background: {THEME["bg"]}; color: {THEME["text"]}; }}
+          .block-container {{ max-width: 1220px; padding-top: 1.35rem; padding-bottom: 3rem; }}
+          .hero {{ background: linear-gradient(110deg, #edf6ff, #ffffff 64%, #e0f0ff); border: 1px solid #c8def4; border-radius: 16px; padding: 22px 30px; margin-bottom: 1.1rem; }}
+          .hero h1 {{ color: #17549b; margin: 0; font-size: 2rem; }}
+          .hero p {{ color: #577693; margin: .4rem 0 0; }}
+          .section-title {{ border-left: 5px solid {THEME["primary_light"]}; color: #1b5695; padding-left: 10px; font-size: 1.1rem; font-weight: 750; margin: .25rem 0 .85rem; }}
+          .result-card, .alternative-card {{ background: {THEME["card_bg"]}; border: 1px solid {THEME["card_border"]}; border-radius: {THEME["radius"]}; padding: 16px 18px; box-shadow: {THEME["shadow"]}; }}
+          .alternative-card {{ min-height: 188px; box-shadow: none; }}
+          .price {{ color: #1264b8; font-size: 1.55rem; font-weight: 750; margin: .05rem 0 .55rem; }}
+          .tag {{ display: inline-block; color: #2264a6; background: {THEME["accent_bg"]}; border: 1px solid #cce2f7; border-radius: 99px; padding: .16rem .5rem; margin: 0 .28rem .28rem 0; font-size: .82rem; }}
+          .muted {{ color: {THEME["muted"]}; font-size: .9rem; }}
+          .summary-box {{ background: {THEME["accent_bg"]}; border-left: 4px solid #2376c9; border-radius: 6px; padding: .8rem 1rem; color: #174b83; margin-top: .85rem; }}
+          .guidance-box {{ background: #f8fbff; border: 1px solid #d7e7f7; border-radius: 9px; padding: .65rem .85rem; color: #315d87; margin-top: .7rem; font-size: .92rem; }}
+          .guidance-examples {{ color: #55728e; margin-top: .35rem; line-height: 1.65; }}
+          .guidance-example {{ display: inline-block; background: #fff; border: 1px solid #cce2f7; border-radius: 99px; padding: .06rem .46rem; margin: .1rem .25rem .1rem 0; color: #2464a5; }}
+          .stChatInput textarea {{ border: 1px solid #b8cde6; border-radius: 9px; }}
+          .stButton > button {{ background: {THEME["primary"]}; color: #fff; border: 1px solid {THEME["primary"]}; border-radius: 7px; font-weight: 600; }}
+          .stButton > button:hover {{ background: #174f8a; border-color: #174f8a; color: #fff; }}
+          .stExpander {{ background: #fff; border: 1px solid #d4e2f0; border-radius: 9px; }}
+          @media (max-width: 720px) {{
+            .block-container {{ padding: .9rem .75rem 2rem; }}
+            .hero {{ padding: 18px 20px; }}
+            .hero h1 {{ font-size: 1.6rem; }}
+            .result-card, .alternative-card {{ padding: 13px 14px; }}
+            .price {{ font-size: 1.35rem; }}
+          }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -238,6 +263,82 @@ def show_recommendation(agent: Agent, result: dict[str, Any]) -> None:
         show_decision_evidence(agent, result, include_trace_expander=False)
 
 
+def show_bundle_recommendation(agent: Agent, result: dict[str, Any]) -> None:
+    """Render a verified multi-product set without treating it as an order."""
+    data = result.get("catalog_data", {})
+    bundle = data.get("bundle", {})
+    quantities_by_product_id: dict[str, int] = {}
+    for item in bundle.get("items", []):
+        product_id = str(item.get("product", {}).get("product_id", "")).strip()
+        if not product_id:
+            continue
+        quantities_by_product_id[product_id] = quantities_by_product_id.get(product_id, 0) + int(
+            item.get("quantity", 1)
+        )
+    products = []
+    seen_product_ids: set[str] = set()
+    for item in data.get("products", []):
+        product_id = str(item.get("product_id", "")).strip()
+        if product_id in seen_product_ids or product_id not in agent.repository.by_id:
+            continue
+        seen_product_ids.add(product_id)
+        products.append(agent.repository.by_id[product_id])
+
+    st.markdown(f'<div class="summary-box">{result["summary"]}</div>', unsafe_allow_html=True)
+    if not products:
+        show_decision_evidence(agent, result)
+        return
+
+    total_price = bundle.get("total_price")
+    if isinstance(total_price, (int, float)):
+        st.caption(f"组合总价：USD {total_price:.2f}；当前结果仅用于商品推荐，不会创建订单。")
+
+    search_strategy = bundle.get("search_strategy")
+    if search_strategy:
+        strategy_text = "穷举检索" if search_strategy == "exact_enumeration" else "有界候选搜索"
+        st.caption(f"组合检索策略：{strategy_text}。完整核验记录可在下方展开查看。")
+
+    columns = st.columns(len(products))
+    for column, product in zip(columns, products):
+        with column:
+            quantity = quantities_by_product_id.get(product.product_id, 1)
+            title = "组合商品" if quantity == 1 else f"组合商品 ×{quantity}"
+            product_card(product, title=title, primary=True)
+    with st.expander("查看组合检索与核验依据"):
+        show_decision_evidence(agent, result, include_trace_expander=False)
+
+
+def show_proactive_guidance(result: dict[str, Any]) -> None:
+    """Expose verified follow-up directions without replacing free-form chat.
+
+    The backend derives each phrase from the retrieved catalog.  Rendering them
+    as optional natural-language examples preserves the chat-first interaction:
+    users may type one verbatim, modify it, or ignore it entirely.
+    """
+    guidance = result.get("proactive_guidance")
+    if not isinstance(guidance, dict):
+        return
+    message = guidance.get("message")
+    examples = guidance.get("example_phrases", [])
+    if not isinstance(message, str) or not message.strip():
+        return
+    example_html = "".join(
+        f'<span class="guidance-example">{escape(str(phrase))}</span>'
+        for phrase in examples
+        if str(phrase).strip()
+    )
+    examples_html = (
+        f'<div class="guidance-examples">例如：{example_html}</div>'
+        if example_html
+        else ""
+    )
+    st.markdown(
+        f'<div class="guidance-box"><strong>下一步可以这样继续：</strong> '
+        f'{escape(message)}{examples_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def show_catalog_answer(agent: Agent, result: dict[str, Any]) -> None:
     """Keep catalog facts concise while making returned products inspectable."""
     st.info(result.get("summary", "已完成商品库查询。"))
@@ -331,6 +432,55 @@ def show_catalog_answer(agent: Agent, result: dict[str, Any]) -> None:
                 product_card(agent.repository.by_id[product_data["product_id"]], title=title)
 
 
+def show_local_collection(agent: Agent, result: dict[str, Any]) -> None:
+    """Render session-local favorites and mock orders with an explicit boundary."""
+    data = result.get("catalog_data", {})
+    kind = data.get("kind")
+    if kind == "simulated_order":
+        order = data.get("order", {})
+        status = order.get("status")
+        if status == "cancelled_local":
+            st.warning(result.get("summary", "已更新本地模拟订单。"))
+        else:
+            st.success(result.get("summary", "已创建本地模拟订单。"))
+        if order:
+            st.caption(
+                f"订单编号：{order.get('order_id', '-')} · 状态：{status or '-'} · "
+                f"总价：USD {float(order.get('total_price', 0)):.2f} · 仅本地模拟"
+            )
+    else:
+        st.info(result.get("summary", "已更新当前会话收藏。"))
+
+    products = [
+        agent.repository.by_id[item["product_id"]]
+        for item in data.get("products", [])
+        if item.get("product_id") in agent.repository.by_id
+    ]
+    if products:
+        columns = st.columns(min(3, len(products)))
+        title = "已收藏商品" if kind in {"favorites", "favorite_saved"} else "模拟订单商品"
+        for column, product in zip(columns, products):
+            with column:
+                product_card(product, title=title, primary=kind == "simulated_order")
+
+    if kind == "simulated_order_list":
+        rows = [
+            {
+                "订单编号": order.get("order_id", "-"),
+                "商品": "、".join(
+                    f'{line.get("product_id", "-")} ×{int(line.get("quantity", 1))}'
+                    for line in order.get("line_items", [])
+                    if isinstance(line, dict)
+                ) or "、".join(order.get("product_ids", [])),
+                "总价": f"${float(order.get('total_price', 0)):.2f}",
+                "状态": order.get("status", "-"),
+            }
+            for order in data.get("orders", [])
+        ]
+        if rows:
+            st.dataframe(rows, hide_index=True, width="stretch")
+
+
 def render_assistant_result(agent: Agent, result: dict[str, Any]) -> None:
     """Render one completed assistant turn in either the history or live slot."""
     response_type = result.get("response_type")
@@ -353,12 +503,17 @@ def render_assistant_result(agent: Agent, result: dict[str, Any]) -> None:
             )
     elif response_type in {"catalog_query", "product_detail", "product_comparison", "exploration"}:
         show_catalog_answer(agent, result)
+    elif response_type == "bundle_recommendation":
+        show_bundle_recommendation(agent, result)
+    elif response_type == "local_collection":
+        show_local_collection(agent, result)
     elif result.get("purchased_product_id") is None:
         st.info(result.get("summary", "请补充需求。"))
         if response_type == "no_match":
             show_closest_alternatives(agent, result)
     else:
         show_recommendation(agent, result)
+    show_proactive_guidance(result)
 
 
 def render_conversation(agent: Agent, state: ConversationState) -> None:
@@ -373,15 +528,28 @@ def render_conversation(agent: Agent, state: ConversationState) -> None:
 
 def recommendation_page(agent: Agent) -> None:
     if "conversation_state" not in st.session_state:
-        st.session_state.conversation_state = ConversationState()
+        conversation_id = str(st.query_params.get("conversation", "")).strip()
+        try:
+            state = ConversationState(conversation_id=conversation_id) if conversation_id else ConversationState()
+            restore_status = agent.restore_local_session(state).get("status")
+        except ValueError:
+            state = ConversationState()
+            restore_status = "invalid_id"
+        st.session_state.conversation_state = state
+        if restore_status == "loaded":
+            st.session_state.local_session_restored = True
     state: ConversationState = st.session_state.conversation_state
+    st.query_params["conversation"] = state.conversation_id
 
     title_column, action_column = st.columns([0.8, 0.2])
     with title_column:
         st.markdown('<div class="section-title">💬 购物对话</div>', unsafe_allow_html=True)
+        if st.session_state.pop("local_session_restored", False):
+            st.caption("已恢复此设备上的会话收藏、模拟订单和排序偏好；聊天原文不会写入本地文件。")
     with action_column:
         if st.button("新建对话", width="stretch"):
             st.session_state.conversation_state = ConversationState()
+            st.query_params["conversation"] = st.session_state.conversation_state.conversation_id
             st.rerun()
 
     render_conversation(agent, state)

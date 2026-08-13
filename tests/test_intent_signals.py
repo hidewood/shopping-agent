@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import unittest
+import json
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from starter.agent_interface import (
+    CatalogLanguageConfig,
     ConversationState,
+    LLMResponseError,
     ProductRepository,
     ShoppingAgent,
     TurnPlan,
@@ -113,6 +117,19 @@ class IntentSignalTests(unittest.TestCase):
         self.assertEqual(status, "mismatch")
         self.assertIsNotNone(error)
 
+    def test_turn_plan_schema_rejects_unknown_transport_fields(self) -> None:
+        """Schema validation must stop fields that the workflow never interprets."""
+        with self.assertRaises(LLMResponseError) as raised:
+            TurnPlan.from_dict(
+                {
+                    "goal": "chat",
+                    "target": "none",
+                    "customer_reply": "你好",
+                    "untrusted_product_id": "P0005",
+                }
+            )
+        self.assertEqual(raised.exception.error_code, "invalid_model_output")
+
     def test_missing_evidence_is_audited_without_blocking_pending_followups(self) -> None:
         plan = TurnPlan(goal="selection", target="catalog", goal_evidence=[])
         status, error = self.agent._goal_evidence_status(
@@ -215,6 +232,39 @@ class IntentSignalTests(unittest.TestCase):
                     signals["has_selection_words"],
                     f"Failed to detect selection verb in: {message}"
                 )
+
+    def test_catalog_language_config_extends_aliases_and_intent_terms(self) -> None:
+        """Deployment vocabulary should be configurable without changing workflow code."""
+        payload = {
+            "item_type_aliases": {"mug": ["保温杯"]},
+            "tag_aliases": {"Ocean": ["海蓝"]},
+            "intent_terms": {"selection": ["替我挑"]},
+            "limits": {
+                "max_bundle_quantity": 6,
+                "recent_conversation_messages": 2,
+            },
+        }
+        config_path = Path("catalog_language.json")
+        with patch.object(Path, "is_file", return_value=True), patch.object(
+            Path, "read_text", return_value=json.dumps(payload, ensure_ascii=False)
+        ):
+            config = CatalogLanguageConfig.load(config_path.parent)
+
+        self.assertIn("保温杯", config.item_type_aliases["mug"])
+        self.assertIn("海蓝", config.tag_aliases["Ocean"])
+        self.assertIn("替我挑", config.intent_terms["selection"])
+        self.assertEqual(config.max_bundle_quantity, 6)
+        self.assertEqual(config.recent_conversation_messages, 2)
+
+    def test_invalid_catalog_language_config_falls_back_to_safe_defaults(self) -> None:
+        with patch.object(Path, "is_file", return_value=True), patch.object(
+            Path, "read_text", return_value="{invalid json"
+        ):
+            config = CatalogLanguageConfig.load(Path("catalog_language.json").parent)
+
+        self.assertIn("马克杯", config.item_type_aliases["mug"])
+        self.assertIn("Ocean", config.tag_aliases)
+        self.assertEqual(config.max_bundle_quantity, 10)
 
 
 if __name__ == "__main__":

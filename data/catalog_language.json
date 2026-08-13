@@ -1,0 +1,34 @@
+{
+  "item_type_aliases": {
+    "mug": ["马克杯", "杯子", "咖啡杯", "水杯"],
+    "shirt": ["T恤", "t恤", "体恤", "衬衫", "上衣"]
+  },
+  "tag_aliases": {
+    "Ocean": ["海洋", "大海", "海洋主题"],
+    "Beach": ["沙滩", "海滩", "沙滩主题"],
+    "Sky": ["天空", "蓝天"],
+    "Nature": ["自然", "大自然", "自然主题"],
+    "Forest": ["森林", "森林主题"],
+    "Mountain": ["山", "山景", "高山"],
+    "Coffee": ["咖啡", "咖啡主题"],
+    "Space": ["太空", "宇宙", "太空主题"],
+    "City": ["城市", "都市", "城市主题"],
+    "Vintage": ["复古", "怀旧", "复古风"],
+    "Winter": ["冬天", "冬季"],
+    "Sunset": ["日落", "夕阳"]
+  },
+  "intent_terms": {
+    "bundle": ["套装", "组合方案", "bundle recommendation"],
+    "selection": ["帮我推荐", "挑一个"]
+  },
+  "limits": {
+    "max_bundle_quantity": 10,
+    "recent_conversation_messages": 4,
+    "bundle_exact_combination_limit": 100000,
+    "bundle_candidate_limit": 16,
+    "bundle_beam_width": 120,
+    "profile_manufacturer_weight": 3,
+    "profile_tag_weight": 1,
+    "profile_item_type_weight": 1
+  }
+}

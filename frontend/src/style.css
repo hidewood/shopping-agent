@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: -apple-system, 'SF Pro Display', Inter, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #ececee;
+  color: #111111;
+  -webkit-font-smoothing: antialiased;
+}
+
+.msg-enter-active { transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1); }
+.msg-enter-from { opacity: 0; transform: translateY(10px); }
+
+@layer components {
+  .card-hover { @apply transition-all duration-200 ease-out; }
+  .card-hover:hover { @apply shadow-soft-hover -translate-y-0.5; }
+}
