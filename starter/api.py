@@ -160,6 +160,18 @@ def require_admin(user: UserResponse = Depends(get_current_user)) -> UserRespons
     return user
 
 
+def optional_user(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> UserResponse | None:
+    """可选认证：游客返回 None，登录用户返回 UserResponse（token 无效也返回 None）。"""
+    if credentials is None:
+        return None
+    try:
+        user_id = auth.decode_access_token(credentials.credentials)
+    except auth.AuthError:
+        return None
+    user = auth.get_user_by_id(user_id)
+    return UserResponse(**user) if user else None
+
+
 # ── auth endpoints ─────────────────────────────────────────────────────
 
 @app.post("/auth/register", response_model=TokenResponse)
@@ -390,10 +402,10 @@ async def health() -> dict[str, Any]:
 # ── conversations ──────────────────────────────────────────────────────
 
 @app.post("/api/conversations")
-async def create_conversation() -> dict[str, str]:
+async def create_conversation(user: UserResponse | None = Depends(optional_user)) -> dict[str, str]:
     state = ConversationState()
     _agent.restore_local_session(state)
-    store.save_conversation(state.conversation_id, None, json.dumps(state.to_dict(), ensure_ascii=False))
+    store.save_conversation(state.conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
     return {"conversation_id": state.conversation_id}
 
 
@@ -406,13 +418,13 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
-async def send_message(conversation_id: str, body: MessageRequest) -> TurnResponse:
+async def send_message(conversation_id: str, body: MessageRequest, user: UserResponse | None = Depends(optional_user)) -> TurnResponse:
     data = store.load_conversation(conversation_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     state = ConversationState.from_dict(data)
     result = _agent.run_turn(body.message, state)
-    store.save_conversation(conversation_id, None, json.dumps(state.to_dict(), ensure_ascii=False))
+    store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
     catalog = result.get("catalog_data") or {}
     return TurnResponse(
         conversation_id=conversation_id,
