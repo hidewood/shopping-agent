@@ -1242,6 +1242,20 @@ class ProductRepository:
             "tags": sorted({tag for product in self.products for tag in product.tags}),
         }
         self._extra_fields = self._discover_extra_fields()
+        self._embedding_index = self._build_embedding_index()
+
+    def _build_embedding_index(self):
+        """构建商品标签的 embedding 索引（模糊主题匹配，依赖缺失时降级为 None）。"""
+        try:
+            from starter.embedding import get_index
+            entries = []
+            for tag in self._catalog["tags"]:
+                aliases = self.language_config.tag_aliases.get(tag, ())
+                search_text = " ".join(filter(None, [tag, *aliases]))
+                entries.append((tag, search_text))
+            return get_index(entries)
+        except Exception:
+            return None
 
     def _discover_extra_fields(self) -> dict[str, list[str]]:
         """Collect unique values for every key found in Product.properties."""
@@ -1325,7 +1339,10 @@ class ProductRepository:
                     "match_source": match_source,
                 }
             )
-            if concept.constraint_strength == "hard":
+            # embedding 相似度匹配的置信度低，即使 concept 声明为 hard，也降级
+            # 为偏好（不做硬过滤），避免误匹配（如 Disney→Classic）造成错误过滤。
+            is_semantic = match_source == "embedding_similarity"
+            if concept.constraint_strength == "hard" and not is_semantic:
                 if matched_tags:
                     # One natural-language concept may resolve to several
                     # catalog alternatives (for example Strawberry OR
@@ -1620,6 +1637,18 @@ class ProductRepository:
         lexical = self.tags_in_text(concept.raw_value)
         if lexical:
             return lexical, "lexical_catalog_match"
+
+        # 模糊主题：精确/别名匹配失败时，用 embedding 相似度找最接近的标签。
+        # 仅对中文描述触发：bge 是中文模型，对英文专有名词/抽象词（如 Disney）
+        # 误匹配率高，会破坏"边界诚实"。
+        if (
+            self._embedding_index is not None
+            and self._embedding_index.available
+            and re.search(r"[一-鿿]", concept.raw_value)
+        ):
+            semantic = self._embedding_index.search(concept.raw_value)
+            if semantic:
+                return [tag for tag, _ in semantic], "embedding_similarity"
         return [], "unresolved"
 
     def _ground_scalar(
