@@ -1105,7 +1105,7 @@ class CatalogLanguageConfig:
     tag_aliases: dict[str, tuple[str, ...]]
     intent_terms: dict[str, tuple[str, ...]]
     max_bundle_quantity: int = 10
-    recent_conversation_messages: int = 4
+    recent_conversation_messages: int = 6
     bundle_exact_combination_limit: int = 100_000
     bundle_candidate_limit: int = 16
     bundle_beam_width: int = 120
@@ -1139,7 +1139,7 @@ class CatalogLanguageConfig:
             tag_aliases=_alias_mapping(payload.get("tag_aliases"), DEFAULT_CATALOG_TAG_ALIASES),
             intent_terms=_term_mapping(payload.get("intent_terms")),
             max_bundle_quantity=positive_limit("max_bundle_quantity", 10),
-            recent_conversation_messages=positive_limit("recent_conversation_messages", 4),
+            recent_conversation_messages=positive_limit("recent_conversation_messages", 6),
             bundle_exact_combination_limit=positive_limit("bundle_exact_combination_limit", 100_000),
             bundle_candidate_limit=positive_limit("bundle_candidate_limit", 16),
             bundle_beam_width=positive_limit("bundle_beam_width", 120),
@@ -2837,7 +2837,7 @@ class ShoppingAgent:
 
         if dialogue_stage == "exploring":
             highlights = self.repository.catalog_highlights(candidates)
-            question = "你更在意预算、主题，还是某个厂商？也可以直接告诉我你想优先满足的条件。"
+            question = "这个是想自己用，还是送人呢？有没有偏好的主题、颜色，或者预算范围？告诉我一点，我就能帮你挑得更准。"
             trace.append(
                 {
                     "step": "catalog_exploration",
@@ -2870,7 +2870,7 @@ class ShoppingAgent:
             message,
             selected.product_id,
             trace,
-            self._format_summary(selected, decision),
+            self._format_summary(selected, decision, grounded),
             "recommendation",
             guidance_products=candidates,
         )
@@ -3510,12 +3510,27 @@ class ShoppingAgent:
             )
         trace.append({"step": "product_comparison", "status": "completed", "product_ids": product_ids})
         price_text = "；".join(f"{product.name}（{product.product_id}）：${product.price:.2f}" for product in products)
+
+        # 比较分析：价格最低 + 共同主题 + 各自特色，帮助用户决策
+        cheapest = min(products, key=lambda p: p.price)
+        tag_sets = [set(p.tags) for p in products]
+        common = set.intersection(*tag_sets) if tag_sets else set()
+        insights = []
+        insights.append(f"价格最低的是 {cheapest.name}（${cheapest.price:.2f}）")
+        if common:
+            insights.append("它们都有 " + "、".join(sorted(common)) + " 主题")
+        for p in products:
+            unique = set(p.tags) - common
+            if unique:
+                insights.append(f"{p.name} 的独特之处是 " + "、".join(sorted(unique)))
+
+        summary = "已并列展示这些商品：" + price_text + "。" + "；".join(insights) + "。"
         return self._finish_turn(
             state,
             message,
             None,
             trace,
-            "已按价格、厂商、标签和描述并列展示这些商品：" + price_text,
+            summary,
             "product_comparison",
             update_shopping_state=False,
             catalog_data={"kind": "product_comparison", "products": [product.to_dict() for product in products]},
@@ -5710,13 +5725,32 @@ class ShoppingAgent:
         )
 
     @staticmethod
-    def _format_summary(selected: Product, decision: PurchaseDecision) -> str:
+    def _format_summary(
+        selected: Product, decision: PurchaseDecision, requirement: GroundedRequirement | None = None
+    ) -> str:
+        # 个性化推荐理由：把「为什么推荐它」说成人话，而不是模板化的「已通过校验」。
+        personal = ""
+        if requirement is not None:
+            reasons = []
+            matched_tags = [
+                t for t in (requirement.preferred_tags + requirement.required_tags)
+                if t in selected.tags
+            ]
+            if matched_tags:
+                reasons.append("它是 " + "、".join(matched_tags) + " 主题")
+            if requirement.max_price is not None and selected.price <= requirement.max_price:
+                reasons.append("在预算内")
+            if requirement.preferred_manufacturer and selected.manufacturer == requirement.preferred_manufacturer:
+                reasons.append(f"来自你偏好的厂商 {selected.manufacturer}")
+            if reasons:
+                personal = " 为什么推荐它：" + "，".join(reasons) + "。"
+
         match_note = ""
         if decision.match_level == "closest_alternative":
             match_note = "偏好条件未能完全验证，以下结果仅保证已满足的硬条件。"
         summary = (
-            f"推荐购买 {selected.name}（{selected.product_id}），价格 ${selected.price:.2f}。"
-            f"{match_note}{decision.reason}"
+            f"推荐 {selected.name}（{selected.product_id}），价格 ${selected.price:.2f}。"
+            f"{personal}{match_note}"
         )
         if decision.tradeoffs:
             summary += " 取舍：" + "；".join(decision.tradeoffs) + "。"
@@ -5728,7 +5762,7 @@ class ShoppingAgent:
         alternatives: list[dict[str, Any]] | None = None,
     ) -> str:
         if requirement.unresolved_hard_constraints:
-            return "商品库无法满足以下硬性条件：" + "；".join(requirement.unresolved_hard_constraints) + "。"
+            return "抱歉，商品库没有你提到的：" + "、".join(requirement.unresolved_hard_constraints) + "。"
         constraints = []
         if requirement.item_type:
             constraints.append(f"类型为 {requirement.item_type}")
@@ -5742,9 +5776,9 @@ class ShoppingAgent:
                 "标签包含 " + " 且 ".join("（" + " 或 ".join(group) + "）" for group in tag_groups)
             )
         detail = "、".join(constraints) or "当前条件"
-        summary = f"商品库中没有同时满足{detail}的商品。"
+        summary = f"抱歉，同时满足「{detail}」的商品没有找到。"
         if not alternatives:
-            return summary + "可以尝试放宽预算、品牌或主题条件。"
+            return summary + "可以试着放宽预算、品牌或主题条件，我再帮你找找。"
         return summary + ShoppingAgent._relaxation_advice(alternatives)
 
     @staticmethod
@@ -5759,24 +5793,24 @@ class ShoppingAgent:
             if constraint == "price":
                 difference = float(gap.get("difference") or 0)
                 if difference:
-                    gap_text = f"与原预算相差 ${difference:.2f}"
+                    gap_text = f"只差 ${difference:.2f}"
                 else:
-                    gap_text = "需要放宽原价格边界才可纳入"
+                    gap_text = "只需放宽价格边界"
                 parts.append(
-                    f"若取消预算限制，最接近的是 {product}（{gap_text}），"
-                    f"它满足其余全部条件；取消预算限制后共有 {item['match_count']} 件可选"
+                    f"不过 {product} 最接近，价格{('' if difference else '稍高')}（{gap_text}），"
+                    f"其它条件都满足，要不要看看？"
                 )
             elif constraint == "manufacturer":
                 parts.append(
-                    f"若不限定厂商 {gap['requested']}，可选 {product}"
-                    f"，厂商为 {gap['actual']}；不限定该厂商后共有 {item['match_count']} 件可选"
+                    f"如果不限定厂商 {gap['requested']}，有 {product}"
+                    f"（厂商为 {gap['actual']}），可以考虑一下？"
                 )
             else:
                 parts.append(
-                    f"若不限定主题，可选 {product}，其标签为 {'、'.join(gap['actual'])}；"
-                    f"不限定主题后共有 {item['match_count']} 件可选"
+                    f"如果不限定主题，有 {product}（标签为 {'、'.join(gap['actual'])}），"
+                    f"或许也符合你的感觉？"
                 )
-        return "最接近的结果是：" + "；".join(parts) + "。"
+        return "；".join(parts) + "。"
 
     @staticmethod
     def _looks_like_missing_price(instruction: str) -> bool:

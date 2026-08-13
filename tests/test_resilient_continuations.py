@@ -305,8 +305,8 @@ class ResilientContinuationTests(unittest.TestCase):
         result = self.agent.run_turn("我想要 Ocean主题马克杯，预算8元以内", ConversationState())
 
         self.assertEqual(result["response_type"], "no_match")
-        self.assertIn("取消预算限制", result["summary"])
-        self.assertIn("与原预算相差 $1.99", result["summary"])
+        self.assertIn("只差 $1.99", result["summary"])
+        self.assertIn("要不要看看", result["summary"])
         self.assertNotIn("若放宽价格条件（", result["summary"])
 
     def test_explicit_open_request_recommends_without_waiting_for_the_planner(self) -> None:

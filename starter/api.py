@@ -18,6 +18,7 @@ GET  /api/catalog/facets         — browse catalog facets
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -489,8 +490,8 @@ def _sync_favorites_profile(state: ConversationState, user_id: str | None) -> No
     state.preference_profile = profile
 
 
-def _record_semantic_preferences(result: dict, user_id: str | None) -> None:
-    """从 trace 提取用户表达的语义偏好（未映射到标签的 preference），持久化。"""
+def _record_semantic_preferences(result: dict, user_id: str | None, message: str = "") -> None:
+    """从 trace 提取用户表达的语义偏好 + 场景意图，持久化（多轮记忆）。"""
     if user_id is None:
         return
     for step in result.get("trace", []):
@@ -499,6 +500,9 @@ def _record_semantic_preferences(result: dict, user_id: str | None) -> None:
         grounded = step.get("grounded_requirements") or {}
         for pref in grounded.get("semantic_preferences", []):
             store.add_preference(user_id, str(pref))
+    # 场景意图：送礼/自用，作为语义偏好词记录（embedding 会映射到相关标签）
+    if re.search(r"送礼|送人|礼物|gift|present", message, re.IGNORECASE):
+        store.add_preference(user_id, "送礼")
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
@@ -523,7 +527,7 @@ async def send_message(conversation_id: str, body: MessageRequest, user: UserRes
         )
 
     result = _agent.run_turn(body.message, state)
-    _record_semantic_preferences(result, user.id if user else None)
+    _record_semantic_preferences(result, user.id if user else None, body.message)
     store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
     catalog = result.get("catalog_data") or {}
     return TurnResponse(
