@@ -13,6 +13,19 @@ htmlcov/
 # Locally generated experiment output
 outputs/
 
+# Local-only diagram sources and rendered documentation visuals
+docs/diagrams/
+docs/images/
+
+# Local-only test suite and test tooling. Test evidence is documented in
+# docs/test-report.md; test code and automation are intentionally not shared.
+tests/
+pytest.ini
+requirements-dev.txt
+frontend/tests/
+frontend/vitest.config.ts
+frontend/playwright.config.ts
+
 # Device-local anonymous session collections (favorites, mock orders and ranking profile)
 local_state/
 
@@ -28,6 +41,9 @@ test_photos/
 .codex-test-logs/
 diagnostic_state/
 tmp*/
+test_runtime/
+frontend/test-results/
+frontend/playwright-report/
 .DS_Store
 Thumbs.db
 *.log

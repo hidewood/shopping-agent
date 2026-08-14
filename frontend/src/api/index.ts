@@ -17,6 +17,18 @@ export interface TurnResult {
   trace: Array<Record<string, unknown>>
 }
 
+export interface ConversationHandle {
+  conversation_id: string
+  conversation_access_token?: string
+}
+
+export interface ConversationSummary {
+  conversation_id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface User {
   id: string
   email: string
@@ -102,23 +114,32 @@ export async function cancelOrder(orderId: string) {
   return r.data
 }
 
-export async function createConversation(): Promise<string> {
+function conversationHeaders(token?: string) {
+  return token ? { 'X-Conversation-Token': token } : undefined
+}
+
+export async function createConversation(): Promise<ConversationHandle> {
   const r = await api.post('/api/conversations')
-  return r.data.conversation_id
-}
-
-export async function sendMessage(cid: string, message: string): Promise<TurnResult> {
-  const r = await api.post(`/api/conversations/${cid}/messages`, { message })
   return r.data
 }
 
-export async function getConversation(cid: string): Promise<Record<string, unknown>> {
-  const r = await api.get(`/api/conversations/${cid}`)
+export async function sendMessage(cid: string, message: string, conversationToken?: string): Promise<TurnResult> {
+  const r = await api.post(`/api/conversations/${cid}/messages`, { message }, { headers: conversationHeaders(conversationToken) })
   return r.data
 }
 
-export async function listConversations() {
+export async function getConversation(cid: string, conversationToken?: string): Promise<Record<string, unknown>> {
+  const r = await api.get(`/api/conversations/${cid}`, { headers: conversationHeaders(conversationToken) })
+  return r.data
+}
+
+export async function listConversations(): Promise<ConversationSummary[]> {
   const r = await api.get('/api/conversations')
+  return r.data
+}
+
+export async function renameConversation(conversationId: string, title: string): Promise<{ title: string }> {
+  const r = await api.patch(`/api/conversations/${conversationId}/title`, { title })
   return r.data
 }
 

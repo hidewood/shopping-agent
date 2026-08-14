@@ -11,6 +11,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 PRODUCTS_PATH = PROJECT_DIR / "data" / "products.jsonl"
+ALLOWED_ITEM_TYPES = {"mug", "shirt"}
 
 
 class CatalogError(Exception):
@@ -41,6 +42,8 @@ def create_product(data: dict) -> dict:
     """新增商品，返回完整商品 dict。"""
     if not data.get("name") or not data.get("item_type") or not data.get("manufacturer") or data.get("price") is None:
         raise CatalogError("名称、类型、厂商、价格为必填")
+    if str(data["item_type"]).strip() not in ALLOWED_ITEM_TYPES:
+        raise CatalogError("商品类型仅支持 mug 或 shirt")
     products = _load()
     product = {
         "product_id": _next_product_id(products),
@@ -59,6 +62,8 @@ def create_product(data: dict) -> dict:
 def update_product(product_id: str, data: dict) -> dict:
     """更新商品的 name/price/tags/description 等字段。"""
     products = _load()
+    if data.get("item_type") is not None and str(data["item_type"]).strip() not in ALLOWED_ITEM_TYPES:
+        raise CatalogError("商品类型仅支持 mug 或 shirt")
     for p in products:
         if p["product_id"] == product_id:
             for key in ("name", "item_type", "manufacturer", "description"):

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +22,13 @@ ORDER_STATUSES = {"pending", "confirmed", "shipped", "delivered", "cancelled"}
 
 class StoreError(Exception):
     """Raised when a cart/order operation is invalid."""
+
+
+def configure_db_path(path: str | Path) -> None:
+    """Point the module at an isolated SQLite database (primarily for tests)."""
+    global DB_PATH
+    DB_PATH = Path(path)
+    init_db()
 
 
 def _connection() -> sqlite3.Connection:
@@ -75,12 +84,19 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS conversations (
             conversation_id TEXT PRIMARY KEY,
             user_id         TEXT,
+            guest_token_hash TEXT,
+            title           TEXT,
             state_json      TEXT NOT NULL,
             created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
     )
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
+    if "guest_token_hash" not in cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN guest_token_hash TEXT")
+    if "title" not in cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT")
     conn.commit()
     conn.close()
 
@@ -418,20 +434,36 @@ def admin_deliver_order(order_id: str) -> dict:
 
 # ── conversations ──────────────────────────────────────────────────────
 
-def save_conversation(conversation_id: str, user_id: str | None, state_json: str) -> None:
+def save_conversation(
+    conversation_id: str,
+    user_id: str | None,
+    state_json: str,
+    guest_token: str | None = None,
+    title: str | None = None,
+) -> None:
     """Upsert a conversation's serialized state."""
     conn = _connection()
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
-        INSERT INTO conversations (conversation_id, user_id, state_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO conversations (conversation_id, user_id, guest_token_hash, title, state_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(conversation_id) DO UPDATE SET
             user_id = excluded.user_id,
+            guest_token_hash = COALESCE(excluded.guest_token_hash, conversations.guest_token_hash),
+            title = COALESCE(excluded.title, conversations.title),
             state_json = excluded.state_json,
             updated_at = excluded.updated_at
         """,
-        (conversation_id, user_id, state_json, now, now),
+        (
+            conversation_id,
+            user_id,
+            _token_hash(guest_token) if guest_token else None,
+            title,
+            state_json,
+            now,
+            now,
+        ),
     )
     conn.commit()
     conn.close()
@@ -440,14 +472,43 @@ def save_conversation(conversation_id: str, user_id: str | None, state_json: str
 def load_conversation(conversation_id: str) -> dict | None:
     """Return a conversation's state dict, or None if absent."""
     conn = _connection()
-    row = conn.execute(
-        "SELECT state_json FROM conversations WHERE conversation_id = ?", (conversation_id,)
-    ).fetchone()
+    row = conn.execute("SELECT state_json FROM conversations WHERE conversation_id = ?", (conversation_id,)).fetchone()
     conn.close()
     if row is None:
         return None
     import json
     return json.loads(row["state_json"])
+
+
+def load_conversation_record(conversation_id: str) -> dict | None:
+    """Return persisted conversation state plus its ownership metadata."""
+    conn = _connection()
+    row = conn.execute(
+        "SELECT user_id, guest_token_hash, title, state_json FROM conversations WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    import json
+    return {
+        "user_id": row["user_id"],
+        "guest_token_hash": row["guest_token_hash"],
+        "title": row["title"],
+        "state": json.loads(row["state_json"]),
+    }
+
+
+def verify_guest_conversation_token(record: dict, token: str | None) -> bool:
+    """Constant-time verification for a guest conversation's bearer token."""
+    expected = record.get("guest_token_hash")
+    if not expected or not token:
+        return False
+    return hmac.compare_digest(expected, _token_hash(token))
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def delete_conversation(conversation_id: str) -> None:
@@ -458,17 +519,29 @@ def delete_conversation(conversation_id: str) -> None:
 
 
 def list_user_conversations(user_id: str) -> list[dict]:
-    """返回某用户的所有会话（id + 时间，用于历史会话列表）。"""
+    """Return a user's named conversations, most recently updated first."""
     conn = _connection()
     rows = conn.execute(
-        "SELECT conversation_id, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC",
+        "SELECT conversation_id, title, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC",
         (user_id,),
     ).fetchall()
     conn.close()
     return [
-        {"conversation_id": r["conversation_id"], "created_at": r["created_at"], "updated_at": r["updated_at"]}
+        {"conversation_id": r["conversation_id"], "title": r["title"], "created_at": r["created_at"], "updated_at": r["updated_at"]}
         for r in rows
     ]
+
+
+def rename_conversation(conversation_id: str, user_id: str, title: str) -> bool:
+    """Rename one owned conversation without exposing guest conversations."""
+    conn = _connection()
+    cursor = conn.execute(
+        "UPDATE conversations SET title = ?, updated_at = ? WHERE conversation_id = ? AND user_id = ?",
+        (title, datetime.now(timezone.utc).isoformat(), conversation_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+    return cursor.rowcount == 1
 
 
 init_db()

@@ -20,30 +20,23 @@ async function handleSend() {
   chatRef.value?.scrollTo({ top: chatRef.value.scrollHeight, behavior: 'smooth' })
 }
 
-function handleGuidance(text: string) {
-  input.value = text
-  handleSend()
-}
-
-const examples = [
-  '海洋主题的马克杯，预算 20 以内',
-  '推荐一件 T 恤，不限预算和风格',
-  '给朋友挑一个生日礼物',
-]
 </script>
 
 <template>
   <div class="flex flex-col h-full">
     <!-- 对话区 -->
     <div ref="chatRef" class="flex-1 overflow-y-auto px-6 py-6">
-      <!-- 空状态：Apple 风首页 -->
-      <div v-if="!store.messages.length" class="h-full flex flex-col items-center justify-center text-center">
-        <h1 class="text-4xl font-bold text-ink tracking-tight mb-3">今天想买什么？</h1>
-        <p class="text-ink-muted mb-12 text-[15px]">告诉我你的需求，我来帮你找到最合适的商品。</p>
+      <!-- 空状态：纯净的 Apple 风输入入口 -->
+      <div v-if="!store.messages.length" class="h-full flex flex-col items-center justify-center text-center px-6">
+        <div class="mb-7 flex h-14 w-14 items-center justify-center rounded-[22px] bg-brand-50 text-brand-600 shadow-soft">
+          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+        </div>
+        <h1 class="text-4xl font-bold text-ink tracking-tight mb-3">今天想找什么？</h1>
+        <p class="text-ink-muted mb-10 text-[15px]">告诉我商品、预算或喜欢的风格。</p>
 
         <!-- 大输入框 -->
         <div class="w-full max-w-xl mb-6">
-          <div class="flex items-center gap-2 bg-surface rounded-input border border-hairline shadow-soft px-5 py-4 focus-within:border-accent-400 focus-within:ring-4 focus-within:ring-accent-100 transition-all">
+          <div class="flex items-center gap-2 bg-surface rounded-[28px] border border-hairline shadow-soft px-5 py-4 focus-within:border-brand-400 focus-within:ring-4 focus-within:ring-brand-50 transition-all">
             <input
               v-model="input"
               @keydown.enter="handleSend"
@@ -53,7 +46,7 @@ const examples = [
             <button
               @click="handleSend"
               :disabled="!input.trim()"
-              class="shrink-0 w-9 h-9 rounded-full bg-accent-500 text-white flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:bg-accent-700 transition-colors cursor-pointer"
+              class="shrink-0 w-10 h-10 rounded-full bg-brand-500 text-white flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:bg-brand-700 transition-colors cursor-pointer"
               title="发送"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M1 8l7-7 7 7" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -61,23 +54,12 @@ const examples = [
           </div>
         </div>
 
-        <!-- 示例 chips -->
-        <div class="flex flex-wrap gap-2 justify-center max-w-xl">
-          <button
-            v-for="ex in examples"
-            :key="ex"
-            @click="input = ex; handleSend()"
-            class="text-[13px] px-4 py-2 rounded-full border border-hairline bg-surface text-ink-muted hover:border-accent-300 hover:text-accent-600 transition-all cursor-pointer"
-          >
-            {{ ex }}
-          </button>
-        </div>
       </div>
 
       <!-- 消息流 -->
       <div v-else class="max-w-3xl mx-auto">
         <TransitionGroup name="msg">
-          <ChatMessage v-for="(msg, i) in store.messages" :key="i" :message="msg" @send="handleGuidance" />
+          <ChatMessage v-for="(msg, i) in store.messages" :key="i" :message="msg" />
         </TransitionGroup>
 
         <!-- Loading -->
@@ -105,7 +87,7 @@ const examples = [
         <button
           @click="handleSend"
           :disabled="!input.trim() || store.loading"
-          class="shrink-0 px-5 py-2.5 rounded-full bg-accent-500 text-white text-sm font-medium hover:bg-accent-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
+          class="shrink-0 px-5 py-2.5 rounded-full bg-brand-500 text-white text-sm font-medium hover:bg-brand-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer"
         >发送</button>
       </div>
     </div>

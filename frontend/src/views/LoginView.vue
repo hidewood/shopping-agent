@@ -24,7 +24,7 @@ async function submit() {
       await auth.register(email.value, password.value, name.value || undefined)
     }
     const redirect = route.query.redirect as string
-    router.push(redirect || '/chat')
+    router.push(redirect || (auth.user?.role === 'admin' ? '/admin' : '/chat'))
   } catch (e: any) {
     error.value = e?.response?.data?.detail || '操作失败，请重试'
   } finally {
@@ -73,6 +73,10 @@ function guest() {
           <button @click="mode = mode === 'login' ? 'register' : 'login'; error = ''" class="text-accent-600 font-medium cursor-pointer hover:underline">
             {{ mode === 'login' ? '注册' : '登录' }}
           </button>
+        </p>
+
+        <p v-if="mode === 'login'" class="text-center text-xs text-ink-faint">
+          管理员请使用已配置的管理员邮箱登录，登录后将进入管理中心。
         </p>
 
         <!-- 分隔线 -->

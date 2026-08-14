@@ -22,7 +22,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+import secrets
+
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -72,25 +74,7 @@ def _extract_products(result: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-app = FastAPI(title="Shopping Agent API", version="0.1.0")
-
-# Static product images (data/images/<productImg>.jpg)
-_images_dir = DATA_DIR / "images"
-if _images_dir.is_dir():
-    app.mount("/images", StaticFiles(directory=str(_images_dir)), name="images")
-
-# Static avatars (data/avatars/*.png)
-_avatars_dir = DATA_DIR / "avatars"
-if _avatars_dir.is_dir():
-    app.mount("/avatars", StaticFiles(directory=str(_avatars_dir)), name="avatars")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+router = APIRouter()
 
 # ── shared agent instance ──────────────────────────────────────────────
 _agent = Agent(DATA_DIR)
@@ -100,6 +84,10 @@ _agent = Agent(DATA_DIR)
 
 class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User message text")
+
+
+class ConversationTitleRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=80)
 
 
 class TurnResponse(BaseModel):
@@ -175,7 +163,7 @@ def optional_user(credentials: HTTPAuthorizationCredentials | None = Depends(_be
 
 # ── auth endpoints ─────────────────────────────────────────────────────
 
-@app.post("/auth/register", response_model=TokenResponse)
+@router.post("/auth/register", response_model=TokenResponse)
 async def register(body: RegisterRequest) -> TokenResponse:
     try:
         user = auth.create_user(body.email, body.password, body.name)
@@ -185,7 +173,7 @@ async def register(body: RegisterRequest) -> TokenResponse:
     return TokenResponse(access_token=token, user=UserResponse(**user))
 
 
-@app.post("/auth/login", response_model=TokenResponse)
+@router.post("/auth/login", response_model=TokenResponse)
 async def login(body: LoginRequest) -> TokenResponse:
     try:
         user = auth.authenticate_user(body.email, body.password)
@@ -195,7 +183,7 @@ async def login(body: LoginRequest) -> TokenResponse:
     return TokenResponse(access_token=token, user=UserResponse(**user))
 
 
-@app.get("/auth/me", response_model=UserResponse)
+@router.get("/auth/me", response_model=UserResponse)
 async def me(user: UserResponse = Depends(get_current_user)) -> UserResponse:
     return user
 
@@ -224,19 +212,19 @@ def _enrich_cart(cart: dict) -> dict:
     return {"cart_id": cart["cart_id"], "items": items, "total_price": round(total, 2)}
 
 
-@app.get("/cart")
+@router.get("/cart")
 async def get_cart(user: UserResponse = Depends(get_current_user)) -> dict:
     return _enrich_cart(store.get_cart(user.id))
 
 
-@app.post("/cart/items")
+@router.post("/cart/items")
 async def add_cart_item(body: CartItemRequest, user: UserResponse = Depends(get_current_user)) -> dict:
     if body.product_id not in _agent.repository.by_id:
         raise HTTPException(status_code=404, detail="商品不存在")
     return _enrich_cart(store.add_cart_item(user.id, body.product_id, body.quantity))
 
 
-@app.patch("/cart/items/{item_id}")
+@router.patch("/cart/items/{item_id}")
 async def update_cart_item(item_id: str, body: CartItemUpdate, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_cart(store.update_cart_item(user.id, item_id, body.quantity))
@@ -244,12 +232,12 @@ async def update_cart_item(item_id: str, body: CartItemUpdate, user: UserRespons
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@app.delete("/cart/items/{item_id}")
+@router.delete("/cart/items/{item_id}")
 async def remove_cart_item(item_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     return _enrich_cart(store.remove_cart_item(user.id, item_id))
 
 
-@app.delete("/cart")
+@router.delete("/cart")
 async def clear_cart(user: UserResponse = Depends(get_current_user)) -> dict:
     return _enrich_cart(store.clear_cart(user.id))
 
@@ -271,7 +259,7 @@ def _enrich_favorites(favorites: list[dict]) -> list[dict]:
     return enriched
 
 
-@app.post("/favorites")
+@router.post("/favorites")
 async def add_favorite(body: FavoriteRequest, user: UserResponse = Depends(get_current_user)) -> dict:
     if body.product_id not in _agent.repository.by_id:
         raise HTTPException(status_code=404, detail="商品不存在")
@@ -279,12 +267,12 @@ async def add_favorite(body: FavoriteRequest, user: UserResponse = Depends(get_c
     return {"favorites": _enrich_favorites(store.list_favorites(user.id))}
 
 
-@app.get("/favorites")
+@router.get("/favorites")
 async def list_favorites(user: UserResponse = Depends(get_current_user)) -> dict:
     return {"favorites": _enrich_favorites(store.list_favorites(user.id))}
 
 
-@app.delete("/favorites/{product_id}")
+@router.delete("/favorites/{product_id}")
 async def remove_favorite(product_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     store.remove_favorite(user.id, product_id)
     return {"favorites": _enrich_favorites(store.list_favorites(user.id))}
@@ -305,7 +293,7 @@ def _enrich_order(order: dict) -> dict:
     return {**order, "items": items}
 
 
-@app.post("/orders")
+@router.post("/orders")
 async def create_order(body: OrderCreateRequest, user: UserResponse = Depends(get_current_user)) -> dict:
     cart = store.get_cart(user.id)
     lines = []
@@ -323,12 +311,12 @@ async def create_order(body: OrderCreateRequest, user: UserResponse = Depends(ge
     return _enrich_order(order)
 
 
-@app.get("/orders")
+@router.get("/orders")
 async def list_orders(user: UserResponse = Depends(get_current_user)) -> list[dict]:
     return [_enrich_order(o) for o in store.list_orders(user.id)]
 
 
-@app.get("/orders/{order_id}")
+@router.get("/orders/{order_id}")
 async def get_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_order(store.get_order(user.id, order_id))
@@ -336,7 +324,7 @@ async def get_order(order_id: str, user: UserResponse = Depends(get_current_user
         raise HTTPException(status_code=404, detail=str(exc)) from None
 
 
-@app.post("/orders/{order_id}/cancel")
+@router.post("/orders/{order_id}/cancel")
 async def cancel_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_order(store.cancel_order(user.id, order_id))
@@ -344,7 +332,7 @@ async def cancel_order(order_id: str, user: UserResponse = Depends(get_current_u
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@app.post("/orders/{order_id}/ship")
+@router.post("/orders/{order_id}/ship")
 async def ship_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_order(store.ship_order(user.id, order_id))
@@ -352,7 +340,7 @@ async def ship_order(order_id: str, user: UserResponse = Depends(get_current_use
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@app.post("/orders/{order_id}/deliver")
+@router.post("/orders/{order_id}/deliver")
 async def deliver_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_order(store.deliver_order(user.id, order_id))
@@ -362,12 +350,12 @@ async def deliver_order(order_id: str, user: UserResponse = Depends(get_current_
 
 # ── admin endpoints ────────────────────────────────────────────────────
 
-@app.get("/admin/orders")
+@router.get("/admin/orders")
 async def admin_orders(_: UserResponse = Depends(require_admin)) -> list[dict]:
     return [_enrich_order(o) for o in store.list_all_orders()]
 
 
-@app.post("/admin/orders/{order_id}/ship")
+@router.post("/admin/orders/{order_id}/ship")
 async def admin_ship(order_id: str, _: UserResponse = Depends(require_admin)) -> dict:
     try:
         return _enrich_order(store.admin_ship_order(order_id))
@@ -375,7 +363,7 @@ async def admin_ship(order_id: str, _: UserResponse = Depends(require_admin)) ->
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@app.post("/admin/orders/{order_id}/deliver")
+@router.post("/admin/orders/{order_id}/deliver")
 async def admin_deliver(order_id: str, _: UserResponse = Depends(require_admin)) -> dict:
     try:
         return _enrich_order(store.admin_deliver_order(order_id))
@@ -383,7 +371,7 @@ async def admin_deliver(order_id: str, _: UserResponse = Depends(require_admin))
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@app.get("/admin/users")
+@router.get("/admin/users")
 async def admin_users(_: UserResponse = Depends(require_admin)) -> list[dict]:
     return auth.list_users()
 
@@ -405,7 +393,7 @@ def _reload_agent() -> None:
     _agent = Agent(DATA_DIR)
 
 
-@app.post("/admin/products")
+@router.post("/admin/products")
 async def admin_create_product(body: ProductUpsert, _: UserResponse = Depends(require_admin)) -> dict:
     try:
         product = catalog.create_product(body.model_dump())
@@ -415,7 +403,7 @@ async def admin_create_product(body: ProductUpsert, _: UserResponse = Depends(re
     return product
 
 
-@app.patch("/admin/products/{product_id}")
+@router.patch("/admin/products/{product_id}")
 async def admin_update_product(product_id: str, body: ProductUpsert, _: UserResponse = Depends(require_admin)) -> dict:
     try:
         product = catalog.update_product(product_id, body.model_dump())
@@ -425,7 +413,7 @@ async def admin_update_product(product_id: str, body: ProductUpsert, _: UserResp
     return product
 
 
-@app.delete("/admin/products/{product_id}")
+@router.delete("/admin/products/{product_id}")
 async def admin_delete_product(product_id: str, _: UserResponse = Depends(require_admin)) -> dict:
     try:
         catalog.delete_product(product_id)
@@ -437,7 +425,7 @@ async def admin_delete_product(product_id: str, _: UserResponse = Depends(requir
 
 # ── health ─────────────────────────────────────────────────────────────
 
-@app.get("/health")
+@router.get("/health")
 async def health() -> dict[str, Any]:
     snapshot = _agent.observability_snapshot()
     return {
@@ -449,25 +437,78 @@ async def health() -> dict[str, Any]:
 
 # ── conversations ──────────────────────────────────────────────────────
 
-@app.get("/api/conversations")
+@router.get("/api/conversations")
 async def list_conversations(user: UserResponse = Depends(get_current_user)) -> list[dict]:
     return store.list_user_conversations(user.id)
 
 
-@app.post("/api/conversations")
+@router.post("/api/conversations")
 async def create_conversation(user: UserResponse | None = Depends(optional_user)) -> dict[str, str]:
     state = ConversationState()
     _agent.restore_local_session(state)
-    store.save_conversation(state.conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
-    return {"conversation_id": state.conversation_id}
+    guest_token = secrets.token_urlsafe(32) if user is None else None
+    store.save_conversation(
+        state.conversation_id,
+        user.id if user else None,
+        json.dumps(state.to_dict(), ensure_ascii=False),
+        guest_token=guest_token,
+    )
+    response = {"conversation_id": state.conversation_id}
+    if guest_token is not None:
+        response["conversation_access_token"] = guest_token
+    return response
 
 
-@app.get("/api/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str) -> dict[str, Any]:
-    data = store.load_conversation(conversation_id)
-    if data is None:
+def _authorized_conversation(
+    conversation_id: str,
+    user: UserResponse | None,
+    guest_token: str | None,
+) -> dict[str, Any]:
+    """Load a conversation and enforce owner or guest-token access."""
+    record = store.load_conversation_record(conversation_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return data
+    owner_id = record["user_id"]
+    if owner_id:
+        if user is None:
+            raise HTTPException(status_code=401, detail="登录后才能访问该会话")
+        if user.id != owner_id and user.role != "admin":
+            raise HTTPException(status_code=403, detail="无权访问该会话")
+    else:
+        if not guest_token:
+            raise HTTPException(status_code=401, detail="缺少游客会话令牌")
+        if not store.verify_guest_conversation_token(record, guest_token):
+            raise HTTPException(status_code=403, detail="游客会话令牌无效")
+    return record
+
+
+@router.get("/api/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    user: UserResponse | None = Depends(optional_user),
+    guest_token: str | None = Header(default=None, alias="X-Conversation-Token"),
+) -> dict[str, Any]:
+    return _authorized_conversation(conversation_id, user, guest_token)["state"]
+
+
+def _conversation_title_from_message(message: str) -> str | None:
+    """Create a stable, compact default title from the first real user input."""
+    normalized = " ".join(message.split())
+    if not normalized:
+        return None
+    return normalized[:40] + ("…" if len(normalized) > 40 else "")
+
+
+@router.patch("/api/conversations/{conversation_id}/title")
+async def rename_conversation(
+    conversation_id: str,
+    body: ConversationTitleRequest,
+    user: UserResponse = Depends(get_current_user),
+) -> dict[str, str]:
+    title = _conversation_title_from_message(body.title)
+    if title is None or not store.rename_conversation(conversation_id, user.id, title):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"conversation_id": conversation_id, "title": title}
 
 
 def _sync_favorites_profile(state: ConversationState, user_id: str | None) -> None:
@@ -497,17 +538,25 @@ def _record_semantic_preferences(result: dict, user_id: str | None, message: str
         store.add_preference(user_id, "送礼")
 
 
-@app.post("/api/conversations/{conversation_id}/messages")
-async def send_message(conversation_id: str, body: MessageRequest, user: UserResponse | None = Depends(optional_user)) -> TurnResponse:
-    data = store.load_conversation(conversation_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    state = ConversationState.from_dict(data)
+@router.post("/api/conversations/{conversation_id}/messages")
+async def send_message(
+    conversation_id: str,
+    body: MessageRequest,
+    user: UserResponse | None = Depends(optional_user),
+    guest_token: str | None = Header(default=None, alias="X-Conversation-Token"),
+) -> TurnResponse:
+    record = _authorized_conversation(conversation_id, user, guest_token)
+    state = ConversationState.from_dict(record["state"])
     _sync_favorites_profile(state, user.id if user else None)
 
     result = _agent.run_turn(body.message, state)
     _record_semantic_preferences(result, user.id if user else None, body.message)
-    store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
+    store.save_conversation(
+        conversation_id,
+        record["user_id"],
+        json.dumps(state.to_dict(), ensure_ascii=False),
+        title=_conversation_title_from_message(body.message) if record["user_id"] and not record.get("title") else None,
+    )
     catalog = result.get("catalog_data") or {}
     return TurnResponse(
         conversation_id=conversation_id,
@@ -523,7 +572,7 @@ async def send_message(conversation_id: str, body: MessageRequest, user: UserRes
 
 # ── products ───────────────────────────────────────────────────────────
 
-@app.get("/api/products")
+@router.get("/api/products")
 async def list_products(
     q: str = Query(default="", description="Search keyword"),
     item_type: str = Query(default="", description="Product type filter"),
@@ -546,7 +595,7 @@ async def list_products(
     }
 
 
-@app.get("/api/products/{product_id}")
+@router.get("/api/products/{product_id}")
 async def get_product(product_id: str) -> dict[str, Any]:
     product = _agent.repository.by_id.get(product_id.upper())
     if product is None:
@@ -556,7 +605,7 @@ async def get_product(product_id: str) -> dict[str, Any]:
 
 # ── catalog ────────────────────────────────────────────────────────────
 
-@app.get("/api/catalog/facets")
+@router.get("/api/catalog/facets")
 async def catalog_facets() -> dict[str, Any]:
     catalog = _agent.repository.catalog()
     return {
@@ -566,3 +615,43 @@ async def catalog_facets() -> dict[str, Any]:
         "available_fields": _agent.repository.available_fields,
         "total_products": len(_agent.repository.products),
     }
+
+
+def create_app(
+    *,
+    data_dir: str | Path = DATA_DIR,
+    local_state_dir: str | Path | None = None,
+    agent: Agent | None = None,
+) -> FastAPI:
+    """Build the API with injectable state for isolated HTTP and E2E tests.
+
+    The production module still exports ``app`` below.  Tests can provide an
+    isolated directory and deterministic Agent without touching user data.
+    """
+    global DATA_DIR, _agent
+    DATA_DIR = Path(data_dir)
+    if local_state_dir is not None:
+        state_dir = Path(local_state_dir)
+        auth.configure_db_path(state_dir / "users.db")
+        store.configure_db_path(state_dir / "store.db")
+    _agent = agent or Agent(DATA_DIR, local_state_dir=local_state_dir)
+
+    application = FastAPI(title="Shopping Agent API", version="0.2.0")
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    images_dir = DATA_DIR / "images"
+    if images_dir.is_dir():
+        application.mount("/images", StaticFiles(directory=str(images_dir)), name="images")
+    avatars_dir = DATA_DIR / "avatars"
+    if avatars_dir.is_dir():
+        application.mount("/avatars", StaticFiles(directory=str(avatars_dir)), name="avatars")
+    application.include_router(router)
+    return application
+
+
+app = create_app()

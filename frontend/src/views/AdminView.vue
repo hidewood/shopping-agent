@@ -93,7 +93,8 @@ async function remove(p: any) {
   load()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  if (!auth.user) await auth.loadUser()
   if (auth.user?.role !== 'admin') { router.push('/chat'); return }
   load()
 })
@@ -143,7 +144,7 @@ onMounted(() => {
       </div>
 
       <!-- 用户管理 -->
-      <div v-else class="space-y-3">
+      <div v-else-if="tab === 'users'" class="space-y-3">
         <div v-for="u in users" :key="u.id" class="bg-surface rounded-card shadow-soft p-4 flex items-center justify-between">
           <div class="flex items-center gap-3">
             <div class="w-9 h-9 rounded-full bg-accent-100 text-accent-600 flex items-center justify-center text-sm font-semibold">

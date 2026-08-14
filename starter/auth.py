@@ -30,6 +30,13 @@ class AuthError(Exception):
     """Raised when a credential or token is invalid."""
 
 
+def configure_db_path(path: str | Path) -> None:
+    """Point the module at an isolated SQLite database (primarily for tests)."""
+    global DB_PATH
+    DB_PATH = Path(path)
+    init_db()
+
+
 def _connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -117,6 +124,32 @@ def set_admin_role(email: str) -> None:
     conn.close()
 
 
+def bootstrap_initial_admin() -> None:
+    """Create the configured initial administrator exactly once.
+
+    Credentials remain in environment variables and the password is immediately
+    hashed. Existing accounts keep their password and profile intact.
+    """
+    email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+    password = os.getenv("ADMIN_INITIAL_PASSWORD", "")
+    if not email or len(password) < 6:
+        return
+    conn = _connection()
+    exists = conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
+    if exists is None:
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, 'admin')",
+            (uuid.uuid4().hex, email, _hash_password(password), "管理员"),
+        )
+        conn.commit()
+    else:
+        # An owner may configure an existing local account after first launch.
+        # Promote it without ever changing its saved password or profile.
+        conn.execute("UPDATE users SET role = 'admin' WHERE email = ?", (email,))
+        conn.commit()
+    conn.close()
+
+
 def list_users() -> list[dict]:
     """Return all users (id/email/name/role/created_at)."""
     conn = _connection()
@@ -141,3 +174,4 @@ def decode_access_token(token: str) -> str:
 
 
 init_db()
+bootstrap_initial_admin()

@@ -207,7 +207,7 @@ Trace 消费者必须处理所有这些不同的结构，使 trace schema 不均
 
 #### 2.4.3 硬编码的产品类型
 
-`RecommendationPolicy.is_ready()` 只检查 `item_type.raw_value` 是否存在，理由是 "mug 和 shirt 是互斥集合"。但这个假设依赖于只有两个不重叠的类型。加上 `book` 或 `electronics` 后，这个假设仍然成立（不同类型的商品仍然互斥），但如果有子类型（如 `laptop` vs `gaming_laptop`），就破了。
+`RecommendationPolicy.is_ready()` 只检查 `item_type.raw_value` 是否存在，理由是 "mug 和 shirt 是互斥集合"。这一假设适用于当前两类目录；若未来增加具有父子关系的类型（如 `laptop` 与 `gaming_laptop`），需改为显式类型层级校验。
 
 ---
 
@@ -322,7 +322,7 @@ Trace 消费者必须处理所有这些不同的结构，使 trace schema 不均
 |---|---|
 | 规划文档 | ✅ `docs/DEVELOPMENT_PLAN.md` |
 | 登录/购物车/订单规划 | ✅ `docs/feature-plan-auth-cart-order.md` |
-| 手动测试样例 | ✅ `docs/manual-test-cases.md`（63 条） |
+| 测试验收说明 | ✅ `docs/test-report.md` |
 | 真实 API 测试脚本 | ✅ `tests/run_manual_tests.py` |
 
 ### Phase 5: Apple 风重构与数据完善 ✅ 已完成
@@ -331,8 +331,8 @@ Trace 消费者必须处理所有这些不同的结构，使 trace schema 不均
 |---|---|---|
 | Apple 风（Soft Minimal AI Commerce） | ✅ | 三栏布局、中性配色、大圆角、去 emoji、SVG 图标 |
 | 商品图片集成 | ✅ | 复制 1746 张图到 `data/images/`，合并 image 字段 |
-| 头像 | ✅ | 哆啦A梦（客服）+ snoopy（用户） |
-| 扩展商品目录 | ✅ | +20 本书（book 品类），验证泛化约束系统 |
+| 统一助手标记 | ✅ | 以无 IP 的简洁购物袋图标替代混用卡通头像 |
+| 商品目录收敛 | ✅ | 移除无图片的书籍，保留 mug 与 shirt 两类可展示商品 |
 | 侧边栏折叠 + 详情栏折叠 | ✅ | 默认收起 |
 
 ### Phase 6: 鲁棒性修复与真实 API 验证 ✅ 已完成
@@ -358,26 +358,26 @@ Trace 消费者必须处理所有这些不同的结构，使 trace schema 不均
 | 登录/购物车/订单 - 阶段C 订单 | ✅ | orders 表 + 状态机 + `/orders/*` 端点 |
 | 登录/购物车/订单 - 阶段D 前端 | ✅ | LoginView + CartView + OrdersView + 侧栏登录入口 |
 
-### Phase 8: 游客链路 + 存储统一 + 管理员界面 ✅ 已完成
+### Phase 8: 游客链路 + 管理员界面 ✅ 已完成
 
 | 任务 | 状态 | 备注 |
 |---|---|---|
 | 游客登录链路 | ✅ | 打开进入登录页，游客可用聊天+商品库，收藏/购物车/订单需登录 |
 | 对话持久化 | ✅ | conversations 表 + ConversationState.from_dict，对话重启后仍在 |
-| 存储统一 | ✅ | 所有数据进 SQLite，废弃 JSON 文件 + 内存 dict |
+| 存储统一 | ⚠️ 部分完成 | 账户数据和对话进入 SQLite；`LocalSessionStore` 仍保留兼容路径 |
 | 对话 user_id 关联 | ✅ | 登录用户对话关联账号（游客 NULL） |
 | 管理员界面基础版 | ✅ | role 字段 + /admin 端点 + AdminView（订单管理+用户列表） |
 | Bug 修复 | ✅ | 登录按钮图标居中 + 未登录路由守卫跳转 |
 | 真实 API 测试 | ✅ | 游客/登录聊天 + 管理员 + 对话持久化全通过 |
 
-### Phase 9: 待办（后续迭代）
+### Phase 9: 补充功能与遗留清理
 
-| 任务 | 优先级 |
-|---|---|
-| 管理员商品管理（增删改查商品） | P2 |
-| 对话历史查看（登录用户查看自己的历史会话） | P2 |
-| LocalSessionStore 完全废弃（移除 JSON 兼容层） | P3 |
-| 收藏同步到 PreferenceProfile 排序信号 | P3 |
+| 任务 | 状态 | 备注 |
+|---|---|---|
+| 管理员商品管理（增删改查商品） | ✅ | `/admin/products` + `AdminView` 商品管理页 |
+| 对话历史查看（登录用户查看自己的历史会话） | ✅ | `/api/conversations` + `HistoryView` |
+| 收藏同步到 PreferenceProfile 排序信号 | ✅ | 每次对话前由 SQLite 收藏重建排序画像 |
+| LocalSessionStore 完全废弃（移除 JSON 兼容层） | ⏳ 待完成 | 需迁移匿名会话/本地模拟订单后删除兼容代码 |
 
 ---
 

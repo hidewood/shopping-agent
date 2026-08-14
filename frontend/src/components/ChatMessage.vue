@@ -24,25 +24,24 @@ const headline = computed(() => {
   return content
 })
 
-const userAvatar = '/avatars/snoopy.png'
-const botAvatar = '/avatars/哆啦A梦.png'
 </script>
 
 <template>
-  <!-- 用户消息：右对齐，snoopy 头像在右 -->
+  <!-- 用户消息：右对齐 -->
   <div v-if="message.role === 'user'" class="flex justify-end items-start gap-3 mb-5">
-    <div class="max-w-[75%] bg-brand-500 text-white rounded-[20px] rounded-br-md px-5 py-3">
+    <div class="max-w-[75%] bg-brand-500 text-white rounded-[22px] rounded-br-md px-5 py-3">
       <p class="text-[14px] leading-relaxed">{{ message.content }}</p>
     </div>
-    <img :src="userAvatar" alt="用户" class="w-12 h-12 rounded-full object-cover shrink-0" />
   </div>
 
-  <!-- 助手消息：左对齐，哆啦A梦 头像在左 -->
+  <!-- 助手消息：左对齐，使用统一的无 IP 标记 -->
   <div v-else class="flex items-start gap-3 mb-6">
-    <img :src="botAvatar" alt="客服" class="w-12 h-12 rounded-full object-cover shrink-0" />
+    <div class="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-50 text-brand-600">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+    </div>
     <div class="flex-1 min-w-0 max-w-[80%]">
       <!-- 白色气泡（文字，宽度自适应） -->
-      <div class="inline-block max-w-full bg-surface text-ink rounded-[20px] rounded-bl-md px-5 py-3.5 shadow-soft border border-hairline">
+      <div class="inline-block max-w-full bg-surface text-ink rounded-[22px] rounded-bl-md px-5 py-3.5 shadow-soft border border-hairline">
         <p class="text-[15px] leading-relaxed whitespace-pre-wrap">{{ headline }}</p>
       </div>
 

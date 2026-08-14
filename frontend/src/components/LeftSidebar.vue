@@ -21,7 +21,7 @@ const navItems = [
   { key: 'favorites', label: '收藏', action: () => router.push('/favorites') },
   { key: 'orders', label: '订单', action: () => router.push('/orders') },
   { key: 'history', label: '历史会话', action: () => router.push('/history') },
-  { key: 'admin', label: '管理后台', action: () => router.push('/admin') },
+  { key: 'admin', label: '管理中心', action: () => router.push('/admin') },
 ]
 
 const icons: Record<string, string> = {
@@ -37,7 +37,7 @@ const icons: Record<string, string> = {
 }
 
 function isActive(key: string) {
-  const map: Record<string, string> = { chat: '/chat', catalog: '/catalog', cart: '/cart', favorites: '/favorites', orders: '/orders', history: '/history' }
+  const map: Record<string, string> = { chat: '/chat', catalog: '/catalog', cart: '/cart', favorites: '/favorites', orders: '/orders', history: '/history', admin: '/admin' }
   return route.path === map[key]
 }
 </script>
@@ -105,7 +105,10 @@ function isActive(key: string) {
         </div>
         <div v-if="!collapsed" class="flex-1 min-w-0">
           <div class="text-[13px] text-ink font-medium truncate">{{ auth.user.name || auth.user.email }}</div>
-          <button @click="auth.logout()" class="text-[11px] text-ink-faint hover:text-red-500 cursor-pointer">退出登录</button>
+          <div class="flex items-center gap-2">
+            <span v-if="auth.user.role === 'admin'" class="text-[10px] font-medium text-accent-600">管理员</span>
+            <button @click="auth.logout()" class="text-[11px] text-ink-faint hover:text-red-500 cursor-pointer">退出登录</button>
+          </div>
         </div>
       </div>
     </div>

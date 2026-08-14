@@ -2,6 +2,7 @@
 import { ref, provide, onMounted } from 'vue'
 import { useChatStore } from './stores/chat'
 import LeftSidebar from './components/LeftSidebar.vue'
+import MobileDock from './components/MobileDock.vue'
 import ProductDetailPanel from './components/ProductDetailPanel.vue'
 
 const store = useChatStore()
@@ -23,12 +24,12 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-screen flex bg-canvas overflow-hidden">
+  <div class="h-screen flex bg-[#f6f6f8] overflow-hidden">
     <!-- 左导航 -->
-    <LeftSidebar />
+    <LeftSidebar class="hidden md:flex" />
 
     <!-- 中间工作区 -->
-    <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
+    <main class="flex-1 flex flex-col min-w-0 overflow-hidden pb-20 md:pb-0">
       <router-view />
     </main>
 
@@ -41,6 +42,7 @@ onMounted(async () => {
         @close="selectedProduct = null"
       />
     </Transition>
+    <MobileDock />
   </div>
 </template>
 

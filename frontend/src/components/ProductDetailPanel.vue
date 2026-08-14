@@ -16,7 +16,7 @@ const imageUrl = computed(() => {
 </script>
 
 <template>
-  <aside class="w-[340px] shrink-0 border-l border-white/60 bg-white/65 backdrop-blur-xl overflow-y-auto">
+  <aside class="w-[380px] shrink-0 border-l border-hairline bg-white overflow-y-auto shadow-[-12px_0_35px_rgba(0,0,0,0.04)]">
     <div v-if="product" class="p-6">
       <!-- Close -->
       <div class="flex justify-between items-center mb-5">
@@ -36,7 +36,7 @@ const imageUrl = computed(() => {
 
       <!-- 名称 + 价格 -->
       <h2 class="text-xl font-bold text-ink leading-snug mb-2">{{ product.name }}</h2>
-      <div class="text-2xl font-bold text-ink mb-3">${{ product.price?.toFixed(2) }}</div>
+      <div class="text-2xl font-bold text-brand-600 mb-3">${{ product.price?.toFixed(2) }}</div>
       <div class="text-[13px] text-ink-muted mb-5">{{ product.product_id }} · {{ product.item_type }} · {{ product.manufacturer }}</div>
 
       <!-- 标签 -->
@@ -45,14 +45,6 @@ const imageUrl = computed(() => {
           class="text-[12px] px-2.5 py-1 rounded-full bg-gray-100 text-ink-muted font-medium">
           {{ tag }}
         </span>
-      </div>
-
-      <!-- 扩展字段（书籍） -->
-      <div v-if="product.author || product.genre || product.pages || product.isbn" class="border-t border-hairline pt-4 mb-5 space-y-2 text-sm">
-        <div v-if="product.author" class="flex gap-3"><span class="text-ink-faint w-14 shrink-0">作者</span><span class="text-ink-soft">{{ product.author }}</span></div>
-        <div v-if="product.genre" class="flex gap-3"><span class="text-ink-faint w-14 shrink-0">类型</span><span class="text-ink-soft">{{ product.genre }}</span></div>
-        <div v-if="product.pages" class="flex gap-3"><span class="text-ink-faint w-14 shrink-0">页数</span><span class="text-ink-soft">{{ product.pages }}</span></div>
-        <div v-if="product.isbn" class="flex gap-3"><span class="text-ink-faint w-14 shrink-0">ISBN</span><span class="text-ink-soft font-mono text-xs">{{ product.isbn }}</span></div>
       </div>
 
       <!-- 推荐理由 -->
@@ -74,7 +66,7 @@ const imageUrl = computed(() => {
       </p>
 
       <!-- CTA -->
-      <button class="w-full py-3.5 rounded-full bg-accent-500 text-white text-[15px] font-semibold hover:bg-accent-700 transition-colors cursor-pointer">
+      <button class="w-full py-3.5 rounded-full bg-[#1d1d1f] text-white text-[15px] font-semibold hover:bg-black transition-colors cursor-pointer">
         加入购物车
       </button>
     </div>

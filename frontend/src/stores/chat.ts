@@ -15,18 +15,21 @@ export interface Message {
 
 export const useChatStore = defineStore('chat', () => {
   const conversationId = ref('')
+  const conversationToken = ref('')
   const messages = ref<Message[]>([])
   const loading = ref(false)
 
   async function init() {
-    conversationId.value = await api.createConversation()
+    const conversation = await api.createConversation()
+    conversationId.value = conversation.conversation_id
+    conversationToken.value = conversation.conversation_access_token || ''
   }
 
   async function send(text: string) {
     messages.value.push({ role: 'user', content: text })
     loading.value = true
     try {
-      const result = await api.sendMessage(conversationId.value, text)
+      const result = await api.sendMessage(conversationId.value, text, conversationToken.value)
       messages.value.push({
         role: 'assistant',
         content: result.summary,
@@ -44,11 +47,13 @@ export const useChatStore = defineStore('chat', () => {
 
   async function reset() {
     messages.value = []
-    conversationId.value = await api.createConversation()
+    const conversation = await api.createConversation()
+    conversationId.value = conversation.conversation_id
+    conversationToken.value = conversation.conversation_access_token || ''
   }
 
   async function loadConversation(cid: string) {
-    const data: any = await api.getConversation(cid)
+    const data: any = await api.getConversation(cid, conversationToken.value)
     conversationId.value = cid
     messages.value = []
     for (const event of data.events || []) {
@@ -70,5 +75,5 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { conversationId, messages, loading, init, send, reset, loadConversation }
+  return { conversationId, conversationToken, messages, loading, init, send, reset, loadConversation }
 })

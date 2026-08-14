@@ -1895,7 +1895,7 @@ The input includes intent_signals to help you classify ambiguous cases. Pay atte
 Key verb signals: "有吗/都有什么/多少钱" = catalog query; "想买/推荐/需要" = selection; "下单/购买/支付" = transaction.
 
 Use goal=chat and target=none only when the latest message needs no catalog fact or external action. Set
-customer_reply to concise natural Chinese, requirement to null, catalog_operations to [], state_action to
+customer_reply to one concise natural-Chinese sentence (normally no more than 28 Chinese characters), requirement to null, catalog_operations to [], state_action to
 "none", selection_mode/action to null. Answer the latest message only;
 do not mention a previous failure or shopping condition unless the latest message explicitly refers to it.
 
@@ -2494,6 +2494,17 @@ class ShoppingAgent:
                 pending_fields=["price_constraint"],
             )
 
+        if self._is_basic_greeting(message):
+            return self._finish_turn(
+                state,
+                message,
+                None,
+                trace + [{"step": "deterministic_greeting", "status": "completed"}],
+                "你好，想找马克杯还是 T 恤？",
+                "chat",
+                update_shopping_state=False,
+            )
+
         previous = self._reduce_requirement(state)
         if self._is_capability_overview_request(message):
             return self._finish_turn(
@@ -2507,9 +2518,7 @@ class ShoppingAgent:
                         "status": "completed",
                     }
                 ],
-                "我可以帮你查询商品、比较商品，并根据预算、主题或厂商条件推荐商品；"
-                "也支持当前会话内的收藏和模拟订单。"
-                "当前不支持下单、支付或取消订单等真实交易。",
+                "我可以查询、比较和推荐商品，也支持收藏与模拟订单；真实下单和支付暂不支持。",
                 "chat",
                 update_shopping_state=False,
             )
