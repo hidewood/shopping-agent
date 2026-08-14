@@ -107,8 +107,8 @@ export async function createConversation(): Promise<string> {
   return r.data.conversation_id
 }
 
-export async function sendMessage(cid: string, message: string, mode: 'turn_plan' | 'react' = 'turn_plan'): Promise<TurnResult> {
-  const r = await api.post(`/api/conversations/${cid}/messages`, { message, mode })
+export async function sendMessage(cid: string, message: string): Promise<TurnResult> {
+  const r = await api.post(`/api/conversations/${cid}/messages`, { message })
   return r.data
 }
 

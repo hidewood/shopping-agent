@@ -100,7 +100,6 @@ _agent = Agent(DATA_DIR)
 
 class MessageRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User message text")
-    mode: str = Field(default="turn_plan", description="turn_plan（结构化推荐）| react（深度对话多步推理）")
 
 
 class TurnResponse(BaseModel):
@@ -472,21 +471,14 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
 
 
 def _sync_favorites_profile(state: ConversationState, user_id: str | None) -> None:
-    """把登录用户的收藏 + 历史语义偏好重建为排序偏好信号。"""
+    """把登录用户的收藏重建为排序偏好信号（厂商/标签/类型的 affinity 计数）。"""
     if user_id is None:
         return
     profile = PreferenceProfile()
-    # 收藏的精确标签/厂商/类型
     for fav in store.list_favorites(user_id):
         product = _agent.repository.by_id.get(fav["product_id"])
         if product is not None:
             profile.record_product(product, signal="favorite")
-    # 历史语义偏好：用 embedding 映射到目录标签，计入偏好（弱信号）
-    idx = _agent.repository._embedding_index
-    if idx is not None and idx.available:
-        for pref in store.list_preferences(user_id):
-            for tag, _sim in idx.search(pref, threshold=0.5):
-                profile.tag_affinity[tag] = min(12, profile.tag_affinity.get(tag, 0) + 1)
     state.preference_profile = profile
 
 
@@ -500,7 +492,7 @@ def _record_semantic_preferences(result: dict, user_id: str | None, message: str
         grounded = step.get("grounded_requirements") or {}
         for pref in grounded.get("semantic_preferences", []):
             store.add_preference(user_id, str(pref))
-    # 场景意图：送礼/自用，作为语义偏好词记录（embedding 会映射到相关标签）
+    # 场景意图：送礼/自用，作为语义偏好词记录（多轮记忆）
     if re.search(r"送礼|送人|礼物|gift|present", message, re.IGNORECASE):
         store.add_preference(user_id, "送礼")
 
@@ -512,19 +504,6 @@ async def send_message(conversation_id: str, body: MessageRequest, user: UserRes
         raise HTTPException(status_code=404, detail="Conversation not found")
     state = ConversationState.from_dict(data)
     _sync_favorites_profile(state, user.id if user else None)
-
-    if body.mode == "react":
-        # ReAct 模式：LangGraph 多步推理（工具调用循环），返回纯文本回答
-        from starter.graph import run_react
-        result = run_react(_agent, body.message, state)
-        store.save_conversation(conversation_id, user.id if user else None, json.dumps(state.to_dict(), ensure_ascii=False))
-        return TurnResponse(
-            conversation_id=conversation_id,
-            response_type=result.get("response_type", "chat"),
-            summary=result.get("summary", ""),
-            purchased_product_id=result.get("purchased_product_id"),
-            trace=result.get("trace", []),
-        )
 
     result = _agent.run_turn(body.message, state)
     _record_semantic_preferences(result, user.id if user else None, body.message)

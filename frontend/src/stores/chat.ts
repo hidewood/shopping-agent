@@ -17,7 +17,6 @@ export const useChatStore = defineStore('chat', () => {
   const conversationId = ref('')
   const messages = ref<Message[]>([])
   const loading = ref(false)
-  const mode = ref<'turn_plan' | 'react'>('turn_plan')
 
   async function init() {
     conversationId.value = await api.createConversation()
@@ -27,7 +26,7 @@ export const useChatStore = defineStore('chat', () => {
     messages.value.push({ role: 'user', content: text })
     loading.value = true
     try {
-      const result = await api.sendMessage(conversationId.value, text, mode.value)
+      const result = await api.sendMessage(conversationId.value, text)
       messages.value.push({
         role: 'assistant',
         content: result.summary,
@@ -71,5 +70,5 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { conversationId, messages, loading, mode, init, send, reset, loadConversation }
+  return { conversationId, messages, loading, init, send, reset, loadConversation }
 })
