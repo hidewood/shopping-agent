@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const api = axios.create({ baseURL: '' })
+const api = axios.create({ baseURL: '', timeout: 32_000 })
 
 // 附加 JWT token 到请求头
 api.interceptors.request.use((config) => {
@@ -9,12 +9,30 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      localStorage.removeItem('access_token')
+      localStorage.removeItem('shopping_agent_user')
+      localStorage.removeItem('shopping_agent_conversation')
+    }
+    return Promise.reject(error)
+  },
+)
+
 export interface TurnResult {
+  request_id: string
   conversation_id: string
   response_type: string
   summary: string
   purchased_product_id: string | null
   trace: Array<Record<string, unknown>>
+  products: Array<Record<string, unknown>>
+  alternatives: Array<Record<string, unknown>>
+  guidance: Record<string, unknown> | null
+  bundle: Record<string, unknown> | null
+  error: { code: string; retriable: boolean } | null
 }
 
 export interface ConversationHandle {
@@ -99,8 +117,8 @@ export async function removeFavorite(productId: string) {
 
 // ── orders ────────────────────────────────────────────────────────────
 
-export async function createOrder() {
-  const r = await api.post('/orders', {})
+export async function createOrder(idempotencyKey: string = crypto.randomUUID()) {
+  const r = await api.post('/orders', {}, { headers: { 'Idempotency-Key': idempotencyKey } })
   return r.data
 }
 
@@ -123,8 +141,19 @@ export async function createConversation(): Promise<ConversationHandle> {
   return r.data
 }
 
-export async function sendMessage(cid: string, message: string, conversationToken?: string): Promise<TurnResult> {
-  const r = await api.post(`/api/conversations/${cid}/messages`, { message }, { headers: conversationHeaders(conversationToken) })
+export async function sendMessage(
+  cid: string,
+  message: string,
+  conversationToken?: string,
+  clientMessageId: string = crypto.randomUUID(),
+  signal?: AbortSignal,
+): Promise<TurnResult> {
+  const headers = { ...(conversationHeaders(conversationToken) || {}), 'Idempotency-Key': clientMessageId }
+  const r = await api.post(
+    `/api/conversations/${cid}/messages`,
+    { message, client_message_id: clientMessageId },
+    { headers, signal },
+  )
   return r.data
 }
 

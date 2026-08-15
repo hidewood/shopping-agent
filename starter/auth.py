@@ -13,13 +13,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jwt
+from dotenv import load_dotenv
 from passlib.context import CryptContext
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_DIR / ".env")
 DB_PATH = PROJECT_DIR / "local_state" / "users.db"
 
-# JWT 配置（生产环境应从 .env 读取强随机密钥）
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-me-in-production")
+# JWT 配置。开发环境允许短期默认值；生产环境必须显式配置随机密钥。
+_DEFAULT_DEV_SECRET = "dev-secret-change-me-in-production"
+_APP_ENV = os.getenv("APP_ENV", "development").strip().casefold()
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", _DEFAULT_DEV_SECRET)
+if _APP_ENV == "production" and (not SECRET_KEY or SECRET_KEY == _DEFAULT_DEV_SECRET):
+    raise RuntimeError("JWT_SECRET_KEY must be explicitly set when APP_ENV=production.")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
@@ -79,8 +85,9 @@ def create_user(email: str, password: str, name: str | None = None) -> dict:
     email = email.strip().lower()
     if not email or not password:
         raise AuthError("邮箱和密码不能为空")
-    admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
-    role = "admin" if (admin_email and email == admin_email) else "user"
+    # Public registration can never grant an administrative role. The initial
+    # administrator is created only by the explicit bootstrap path below.
+    role = "user"
     user_id = uuid.uuid4().hex
     conn = _connection()
     try:
@@ -132,7 +139,7 @@ def bootstrap_initial_admin() -> None:
     """
     email = os.getenv("ADMIN_EMAIL", "").strip().lower()
     password = os.getenv("ADMIN_INITIAL_PASSWORD", "")
-    if not email or len(password) < 6:
+    if not email or len(password) < 12:
         return
     conn = _connection()
     exists = conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
@@ -142,11 +149,8 @@ def bootstrap_initial_admin() -> None:
             (uuid.uuid4().hex, email, _hash_password(password), "管理员"),
         )
         conn.commit()
-    else:
-        # An owner may configure an existing local account after first launch.
-        # Promote it without ever changing its saved password or profile.
-        conn.execute("UPDATE users SET role = 'admin' WHERE email = ?", (email,))
-        conn.commit()
+    # Never promote an account that was created through public registration.
+    # Operators must choose a fresh ADMIN_EMAIL or promote it out-of-band.
     conn.close()
 
 

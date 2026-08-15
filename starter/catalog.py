@@ -44,13 +44,19 @@ def create_product(data: dict) -> dict:
         raise CatalogError("名称、类型、厂商、价格为必填")
     if str(data["item_type"]).strip() not in ALLOWED_ITEM_TYPES:
         raise CatalogError("商品类型仅支持 mug 或 shirt")
+    try:
+        price = round(float(data["price"]), 2)
+    except (TypeError, ValueError):
+        raise CatalogError("价格必须是有效数字") from None
+    if price <= 0:
+        raise CatalogError("价格必须大于 0")
     products = _load()
     product = {
         "product_id": _next_product_id(products),
         "name": str(data["name"]).strip(),
         "item_type": str(data["item_type"]).strip(),
         "manufacturer": str(data["manufacturer"]).strip(),
-        "price": round(float(data["price"]), 2),
+        "price": price,
         "tags": [str(t).strip() for t in data.get("tags", []) if str(t).strip()],
         "description": str(data.get("description", "")).strip(),
     }
@@ -70,7 +76,13 @@ def update_product(product_id: str, data: dict) -> dict:
                 if key in data and data[key] is not None:
                     p[key] = str(data[key]).strip()
             if "price" in data and data["price"] is not None:
-                p["price"] = round(float(data["price"]), 2)
+                try:
+                    price = round(float(data["price"]), 2)
+                except (TypeError, ValueError):
+                    raise CatalogError("价格必须是有效数字") from None
+                if price <= 0:
+                    raise CatalogError("价格必须大于 0")
+                p["price"] = price
             if "tags" in data and data["tags"] is not None:
                 p["tags"] = [str(t).strip() for t in data["tags"] if str(t).strip()]
             _save(products)

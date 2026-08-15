@@ -40,6 +40,11 @@ function isActive(key: string) {
   const map: Record<string, string> = { chat: '/chat', catalog: '/catalog', cart: '/cart', favorites: '/favorites', orders: '/orders', history: '/history', admin: '/admin' }
   return route.path === map[key]
 }
+
+function logout() {
+  auth.logout()
+  router.push('/login')
+}
 </script>
 
 <template>
@@ -107,7 +112,7 @@ function isActive(key: string) {
           <div class="text-[13px] text-ink font-medium truncate">{{ auth.user.name || auth.user.email }}</div>
           <div class="flex items-center gap-2">
             <span v-if="auth.user.role === 'admin'" class="text-[10px] font-medium text-accent-600">管理员</span>
-            <button @click="auth.logout()" class="text-[11px] text-ink-faint hover:text-red-500 cursor-pointer">退出登录</button>
+            <button @click="logout" class="text-[11px] text-ink-faint hover:text-red-500 cursor-pointer">退出登录</button>
           </div>
         </div>
       </div>

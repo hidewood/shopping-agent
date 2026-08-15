@@ -30,7 +30,12 @@ class LLMProvider(ABC):
     """
 
     @abstractmethod
-    def chat_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Send a conversation and return a parsed JSON object."""
 
     @property
@@ -55,18 +60,38 @@ class DeepSeekClient(LLMProvider):
             max_retries=settings.max_retries,
         )
         self._model = settings.model
+        self._thinking_enabled = settings.thinking_enabled
 
     @property
     def supports_circuit_breaker(self) -> bool:
         return True
 
-    def chat_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         try:
+            request: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "max_tokens": 4096,
+                "extra_body": {
+                    "thinking": {
+                        "type": "enabled" if self._thinking_enabled else "disabled"
+                    }
+                },
+            }
+            # DeepSeek thinking mode ignores temperature. Keep deterministic
+            # sampling explicit only for the non-thinking JSON planner.
+            if not self._thinking_enabled:
+                request["temperature"] = 0.1
+            if timeout_seconds is not None:
+                request["timeout"] = max(1.0, timeout_seconds)
             response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=0.2,
-                response_format={"type": "json_object"},
+                **request,
             )
             content = response.choices[0].message.content or ""
         except Exception as exc:  # API library exposes provider-specific exception classes.

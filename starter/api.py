@@ -17,10 +17,11 @@ GET  /api/catalog/facets         — browse catalog facets
 
 from __future__ import annotations
 
+import asyncio
 import json
-import re
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import secrets
 
@@ -29,12 +30,47 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from starter import auth, catalog, store
-from starter.agent_interface import Agent, ConversationState, PreferenceProfile
+from starter.agent_interface import Agent, ConversationState
+from starter.v3_engine import ExecutionContext
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_DIR / "data"
+
+_PRIVATE_TRACE_FIELDS = {
+    "warning",
+    "raw_response",
+    "prompt",
+    "messages",
+    "api_key",
+    "authorization",
+}
+
+
+def _sanitize_public(value: Any) -> Any:
+    """Recursively remove provider text and credential-shaped fields."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_public(item)
+            for key, item in value.items()
+            if key.casefold() not in _PRIVATE_TRACE_FIELDS
+        }
+    if isinstance(value, list):
+        return [_sanitize_public(item) for item in value]
+    return value
+
+
+def _public_trace(trace: Any) -> list[dict[str, Any]]:
+    if not isinstance(trace, list):
+        return []
+    return [_sanitize_public(step) for step in trace if isinstance(step, dict)]
+
+
+def _state_for_persistence(state: ConversationState) -> dict[str, Any]:
+    """Persist only recursively sanitized state and result traces."""
+    return _sanitize_public(state.to_dict())
 
 def _extract_alternatives(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     """Pull closest-alternative products from catalog_data."""
@@ -78,12 +114,21 @@ router = APIRouter()
 
 # ── shared agent instance ──────────────────────────────────────────────
 _agent = Agent(DATA_DIR)
+_conversation_locks: dict[str, asyncio.Lock] = {}
+_conversation_locks_guard = asyncio.Lock()
+
+
+async def _conversation_lock(conversation_id: str) -> asyncio.Lock:
+    """Return the process-local lock used to serialize one conversation turn."""
+    async with _conversation_locks_guard:
+        return _conversation_locks.setdefault(conversation_id, asyncio.Lock())
 
 
 # ── request / response models ──────────────────────────────────────────
 
 class MessageRequest(BaseModel):
-    message: str = Field(..., min_length=1, description="User message text")
+    message: str = Field(..., min_length=1, max_length=4000, description="User message text")
+    client_message_id: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class ConversationTitleRequest(BaseModel):
@@ -99,6 +144,9 @@ class TurnResponse(BaseModel):
     products: list[dict[str, Any]] = []
     alternatives: list[dict[str, Any]] = []
     guidance: dict[str, Any] | None = None
+    bundle: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    request_id: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -150,15 +198,17 @@ def require_admin(user: UserResponse = Depends(get_current_user)) -> UserRespons
 
 
 def optional_user(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> UserResponse | None:
-    """可选认证：游客返回 None，登录用户返回 UserResponse（token 无效也返回 None）。"""
+    """Return a guest only when no token was supplied; reject invalid tokens."""
     if credentials is None:
         return None
     try:
         user_id = auth.decode_access_token(credentials.credentials)
-    except auth.AuthError:
-        return None
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from None
     user = auth.get_user_by_id(user_id)
-    return UserResponse(**user) if user else None
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return UserResponse(**user)
 
 
 # ── auth endpoints ─────────────────────────────────────────────────────
@@ -294,20 +344,18 @@ def _enrich_order(order: dict) -> dict:
 
 
 @router.post("/orders")
-async def create_order(body: OrderCreateRequest, user: UserResponse = Depends(get_current_user)) -> dict:
-    cart = store.get_cart(user.id)
-    lines = []
-    for item in cart["items"]:
-        product = _agent.repository.by_id.get(item["product_id"])
-        if product is None:
-            continue
-        lines.append({"product_id": item["product_id"], "quantity": item["quantity"], "price": product.price})
+async def create_order(
+    body: OrderCreateRequest,
+    user: UserResponse = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    if idempotency_key is not None and not (8 <= len(idempotency_key) <= 80):
+        raise HTTPException(status_code=400, detail="Idempotency-Key 长度需在 8-80 之间")
+    prices = {product.product_id: product.price for product in _agent.repository.products}
     try:
-        order = store.create_order(user.id, lines)
+        order = store.create_order_from_cart(user.id, prices, idempotency_key=idempotency_key)
     except store.StoreError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    # 下单后清空购物车
-    store.clear_cart(user.id)
     return _enrich_order(order)
 
 
@@ -328,22 +376,6 @@ async def get_order(order_id: str, user: UserResponse = Depends(get_current_user
 async def cancel_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
     try:
         return _enrich_order(store.cancel_order(user.id, order_id))
-    except store.StoreError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-
-@router.post("/orders/{order_id}/ship")
-async def ship_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
-    try:
-        return _enrich_order(store.ship_order(user.id, order_id))
-    except store.StoreError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-
-@router.post("/orders/{order_id}/deliver")
-async def deliver_order(order_id: str, user: UserResponse = Depends(get_current_user)) -> dict:
-    try:
-        return _enrich_order(store.deliver_order(user.id, order_id))
     except store.StoreError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -379,12 +411,12 @@ async def admin_users(_: UserResponse = Depends(require_admin)) -> list[dict]:
 # ── admin product management ───────────────────────────────────────────
 
 class ProductUpsert(BaseModel):
-    name: str
-    item_type: str
-    manufacturer: str
-    price: float
-    tags: list[str] = []
-    description: str = ""
+    name: str = Field(..., min_length=1, max_length=160)
+    item_type: Literal["mug", "shirt"]
+    manufacturer: str = Field(..., min_length=1, max_length=120)
+    price: float = Field(..., gt=0)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    description: str = Field(default="", max_length=1000)
 
 
 def _reload_agent() -> None:
@@ -445,7 +477,6 @@ async def list_conversations(user: UserResponse = Depends(get_current_user)) -> 
 @router.post("/api/conversations")
 async def create_conversation(user: UserResponse | None = Depends(optional_user)) -> dict[str, str]:
     state = ConversationState()
-    _agent.restore_local_session(state)
     guest_token = secrets.token_urlsafe(32) if user is None else None
     store.save_conversation(
         state.conversation_id,
@@ -472,7 +503,7 @@ def _authorized_conversation(
     if owner_id:
         if user is None:
             raise HTTPException(status_code=401, detail="登录后才能访问该会话")
-        if user.id != owner_id and user.role != "admin":
+        if user.id != owner_id:
             raise HTTPException(status_code=403, detail="无权访问该会话")
     else:
         if not guest_token:
@@ -488,7 +519,18 @@ async def get_conversation(
     user: UserResponse | None = Depends(optional_user),
     guest_token: str | None = Header(default=None, alias="X-Conversation-Token"),
 ) -> dict[str, Any]:
-    return _authorized_conversation(conversation_id, user, guest_token)["state"]
+    state = _authorized_conversation(conversation_id, user, guest_token)["state"]
+    # Persisted assistant events predate the HTTP response envelope. Hydrate
+    # cards here so history restoration has the same data as a live turn.
+    for event in state.get("events", []):
+        result = (event.get("payload") or {}).get("result") if isinstance(event, dict) else None
+        if not isinstance(result, dict):
+            continue
+        result["trace"] = _public_trace(result.get("trace"))
+        catalog_data = result.setdefault("catalog_data", {})
+        if isinstance(catalog_data, dict) and not catalog_data.get("products"):
+            catalog_data["products"] = _extract_products(result)
+    return state
 
 
 def _conversation_title_from_message(message: str) -> str | None:
@@ -511,63 +553,103 @@ async def rename_conversation(
     return {"conversation_id": conversation_id, "title": title}
 
 
-def _sync_favorites_profile(state: ConversationState, user_id: str | None) -> None:
-    """把登录用户的收藏重建为排序偏好信号（厂商/标签/类型的 affinity 计数）。"""
-    if user_id is None:
-        return
-    profile = PreferenceProfile()
-    for fav in store.list_favorites(user_id):
-        product = _agent.repository.by_id.get(fav["product_id"])
-        if product is not None:
-            profile.record_product(product, signal="favorite")
-    state.preference_profile = profile
-
-
-def _record_semantic_preferences(result: dict, user_id: str | None, message: str = "") -> None:
-    """从 trace 提取用户表达的语义偏好 + 场景意图，持久化（多轮记忆）。"""
-    if user_id is None:
-        return
-    for step in result.get("trace", []):
-        if step.get("step") != "catalog_grounding":
-            continue
-        grounded = step.get("grounded_requirements") or {}
-        for pref in grounded.get("semantic_preferences", []):
-            store.add_preference(user_id, str(pref))
-    # 场景意图：送礼/自用，作为语义偏好词记录（多轮记忆）
-    if re.search(r"送礼|送人|礼物|gift|present", message, re.IGNORECASE):
-        store.add_preference(user_id, "送礼")
-
-
 @router.post("/api/conversations/{conversation_id}/messages")
 async def send_message(
     conversation_id: str,
     body: MessageRequest,
     user: UserResponse | None = Depends(optional_user),
     guest_token: str | None = Header(default=None, alias="X-Conversation-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> TurnResponse:
-    record = _authorized_conversation(conversation_id, user, guest_token)
-    state = ConversationState.from_dict(record["state"])
-    _sync_favorites_profile(state, user.id if user else None)
+    if body.client_message_id and idempotency_key and body.client_message_id != idempotency_key:
+        raise HTTPException(status_code=400, detail="请求体与请求头中的幂等键不一致")
+    if idempotency_key is not None and not (8 <= len(idempotency_key) <= 80):
+        raise HTTPException(status_code=400, detail="Idempotency-Key 长度需在 8-80 之间")
+    message_id = body.client_message_id or idempotency_key or secrets.token_urlsafe(18)
+    lock = await _conversation_lock(conversation_id)
+    async with lock:
+        record = _authorized_conversation(conversation_id, user, guest_token)
+        cached = store.load_processed_turn(conversation_id, message_id)
+        if cached is not None:
+            return TurnResponse.model_validate(cached)
+        state = ConversationState.from_dict(record["state"])
+        account_user_id = record["user_id"]
+        # The model client is synchronous. Moving it off the event loop keeps
+        # health checks and other conversations responsive during a long turn.
+        execution_context = ExecutionContext(
+            user_id=account_user_id,
+            role=user.role if (user and account_user_id == user.id) else "guest",
+            message_id=message_id,
+            expected_revision=record["revision"],
+        )
 
-    result = _agent.run_turn(body.message, state)
-    _record_semantic_preferences(result, user.id if user else None, body.message)
-    store.save_conversation(
-        conversation_id,
-        record["user_id"],
-        json.dumps(state.to_dict(), ensure_ascii=False),
-        title=_conversation_title_from_message(body.message) if record["user_id"] and not record.get("title") else None,
-    )
-    catalog = result.get("catalog_data") or {}
-    return TurnResponse(
-        conversation_id=conversation_id,
-        response_type=result.get("response_type", "unknown"),
-        summary=result.get("summary", ""),
-        purchased_product_id=result.get("purchased_product_id"),
-        trace=result.get("trace", []),
-        products=_extract_products(result),
-        alternatives=_extract_alternatives(catalog),
-        guidance=result.get("proactive_guidance"),
-    )
+        def store_query(kind: str, user_id: str | None) -> dict[str, Any] | None:
+            """Read the logged-in user's account state for the dialogue read clauses."""
+            if user_id is None:
+                return None
+            if kind == "order_query":
+                return {"orders": [_enrich_order(o) for o in store.list_orders(user_id)]}
+            if kind == "favorite_list":
+                return {"favorites": _enrich_favorites(store.list_favorites(user_id))}
+            if kind == "cart_query":
+                return {"cart": _enrich_cart(store.get_cart(user_id))}
+            return None
+
+        result = await run_in_threadpool(
+            _agent.run_turn, body.message, state, execution_context, store_query
+        )
+        effects = list(result.pop("effects", []) or [])
+        title = _conversation_title_from_message(body.message) if record["user_id"] and not record.get("title") else None
+        catalog = result.get("catalog_data") or {}
+        error = None
+        if result.get("response_type") == "service_error":
+            failed = next((step for step in reversed(result.get("trace", [])) if step.get("step") == "model_service"), {})
+            code = failed.get("error_code", "model_unavailable")
+            error = {
+                "code": code,
+                "retriable": code in {
+                    "timeout", "connection", "rate_limit", "provider_status",
+                    "model_request_error", "circuit_open",
+                },
+            }
+        response = TurnResponse(
+            conversation_id=conversation_id,
+            response_type=result.get("response_type", "unknown"),
+            summary=result.get("summary", ""),
+            purchased_product_id=result.get("purchased_product_id"),
+            trace=_public_trace(result.get("trace")),
+            products=_extract_products(result),
+            alternatives=_extract_alternatives(catalog),
+            guidance=result.get("proactive_guidance"),
+            bundle=catalog.get("bundle"),
+            error=error,
+            request_id=message_id,
+        )
+        # Retriable model/protocol failures are deliberately not persisted or
+        # registered as processed messages. Reusing the same request ID then
+        # performs a real retry while the last valid conversation stays intact.
+        if result.get("response_type") == "service_error":
+            return response
+        try:
+            commit_status = store.commit_conversation_turn(
+                conversation_id=conversation_id,
+                expected_revision=record["revision"],
+                state_json=json.dumps(_state_for_persistence(state), ensure_ascii=False),
+                response_json=response.model_dump_json(),
+                message_id=message_id,
+                user_id=account_user_id,
+                effects=effects,
+                title=title,
+            )
+        except store.StoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if commit_status == "replayed":
+            replayed = store.load_processed_turn(conversation_id, message_id)
+            if replayed is not None:
+                return TurnResponse.model_validate(replayed)
+        if commit_status != "committed":
+            raise HTTPException(status_code=409, detail="会话已在其他窗口更新，请刷新后重试")
+        return response
 
 
 # ── products ───────────────────────────────────────────────────────────
@@ -636,10 +718,11 @@ def create_app(
         store.configure_db_path(state_dir / "store.db")
     _agent = agent or Agent(DATA_DIR, local_state_dir=local_state_dir)
 
-    application = FastAPI(title="Shopping Agent API", version="0.2.0")
+    application = FastAPI(title="Shopping Agent API", version="0.3.0")
+    cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

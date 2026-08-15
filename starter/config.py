@@ -25,6 +25,7 @@ class Settings:
     timeout_seconds: float
     max_retries: int
     circuit_breaker_seconds: float
+    thinking_enabled: bool = False
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -41,11 +42,11 @@ class Settings:
             raise ConfigurationError("AGENT_MAX_CANDIDATES must be an integer.") from exc
 
         try:
-            timeout_seconds = max(1.0, float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "45")))
+            timeout_seconds = max(1.0, float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "30")))
         except ValueError as exc:
             raise ConfigurationError("DEEPSEEK_TIMEOUT_SECONDS must be a number.") from exc
         try:
-            max_retries = max(0, min(2, int(os.getenv("DEEPSEEK_MAX_RETRIES", "1"))))
+            max_retries = max(0, min(2, int(os.getenv("DEEPSEEK_MAX_RETRIES", "0"))))
         except ValueError as exc:
             raise ConfigurationError("DEEPSEEK_MAX_RETRIES must be an integer between 0 and 2.") from exc
         try:
@@ -55,6 +56,11 @@ class Settings:
         except ValueError as exc:
             raise ConfigurationError("DEEPSEEK_CIRCUIT_BREAKER_SECONDS must be a number.") from exc
 
+        raw_thinking = os.getenv("DEEPSEEK_THINKING_ENABLED", "false").strip().casefold()
+        if raw_thinking not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ConfigurationError("DEEPSEEK_THINKING_ENABLED must be true or false.")
+        thinking_enabled = raw_thinking in {"true", "1", "yes"}
+
         return cls(
             api_key=api_key,
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro").strip(),
@@ -62,4 +68,5 @@ class Settings:
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             circuit_breaker_seconds=circuit_breaker_seconds,
+            thinking_enabled=thinking_enabled,
         )

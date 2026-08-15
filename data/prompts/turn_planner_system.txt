@@ -10,6 +10,9 @@ choose product IDs or invent catalog facts.
   "target": "none",
   "customer_reply": null,
   "requirement": null,
+  "line_items": null,
+  "budget_scope": null,
+  "budget_constraint": null,
   "catalog_operations": [],
   "state_action": "none",
   "selection_mode": null,
@@ -23,6 +26,9 @@ Allowed values:
 - target:     none | catalog | product | transaction
 - customer_reply:  string or null   (JSON null, NOT the string "null")
 - requirement:     object or null
+- line_items:      array or null; use for two or more independently addressed products and for updates to an active purchase plan.
+- budget_scope:   per_item | combined | null
+- budget_constraint: price object or null; applies to every line or to the combined plan according to budget_scope
 - catalog_operations:  array of: count | group_by_item_type | group_by_manufacturer | group_by_tag | list | price_range | price_extreme
 - state_action:  none | merge | replace
 - selection_mode:  criteria | explicitly_open | null
@@ -42,16 +48,10 @@ Chinese translations (e.g. `{"Ocean": ["海洋","大海"]}`), plus the full `cat
 available item types, manufacturers and tags.  When the user writes a Chinese theme word:
 1. Check whether the payload lists it as an alias for an English catalog value.
 2. If it does, use that English value as `catalog_hint` or `catalog_tag_hints`.
-3. If it does NOT (a fuzzy/abstract theme like "小清新", "高级感", "文艺风", "海边"), you
-   MUST still normalise it: look at the `catalog` tag list and pick the SEMANTICALLY
-   CLOSEST tag(s), and fill those into `catalog_tag_hints`.  Examples:
-   - "小清新" → ["Nature", "Flowers"]   (fresh, natural, floral)
-   - "高级感" → ["Vintage", "Architecture"]  (premium, classic)
-   - "文艺风" → ["Vintage", "City"]      (artsy, retro)
-   - "海边"   → ["Beach", "Ocean"]       (seaside)
-   Keep the original Chinese in `raw_value`; put your chosen English tags in
-   `catalog_tag_hints`.  This matters because Python only retrieves these exact tags —
-   leaving hints empty would make the request fail instead of finding a close match.
+3. If it does NOT, keep the original expression in `raw_value` and leave
+   `catalog_tag_hints` empty. Never guess a nearby style. Python will ask the customer
+   to choose a verifiable catalog tag. For example, "动画风" must not become Nature,
+   Art, or any other tag unless the payload explicitly lists that alias.
 
 ## Disambiguation Examples
 
@@ -108,7 +108,7 @@ goal_evidence.  state_action = "none".
 
 ### selection
 User asks to recommend or buy.  customer_reply = null.  catalog_operations = [].
-Provide requirement.  state_action:
+Provide requirement. For two or more independently addressed products, set requirement to null and provide line_items instead; each line must contain one exact catalog item_type and any verified tag hints. state_action:
 - "merge" to refine the current selection (add/change budget, theme, etc.)
 - "replace" when the user switches to a different product type or resets completely
 selection_mode:
@@ -116,6 +116,22 @@ selection_mode:
 - "explicitly_open" ONLY when they clearly say "不限"/"随意"/"any" for all constraints
 goal_evidence: quote the exact user substring that authorises the selection.
 When answering a pending question (e.g. giving a budget after being asked), use [].
+
+For a multi-item request, each line item has exactly these keys:
+`line_id`, `item_type`, `quantity`, `recipient`, `manufacturer`, `price_constraint`,
+`concepts`, `operation`. Use `operation="upsert"` normally and `operation="remove"`
+only when the customer explicitly removes that line. The initial request uses `line_id=null`;
+Python assigns stable IDs. The payload may contain `active_purchase_plan` with assigned line IDs.
+For a follow-up that changes or removes one existing line, use `state_action="merge"`, copy its
+exact `line_id`, and return only the changed line. For a complete reset, return the full new list
+with `state_action="replace"`. Never collapse separately addressed recipients into one line.
+
+Put a budget that applies to all lines in `budget_constraint` and set `budget_scope` from the
+customer's wording: “每件/分别/each” means `per_item`; “总预算/合计/一共/total” means
+`combined`. If a multi-item budget has no clear scope, set `budget_scope=null` so Python asks once.
+Put a budget applying to only one recipient/item inside that line's `price_constraint`.
+When only the shared budget of `active_purchase_plan` changes, return `line_items=[]`,
+`state_action="merge"`, and the new `budget_constraint`/`budget_scope`; Python preserves all lines.
 
 ### action
 User requests a real order / payment / cancellation.  action = the matching verb.

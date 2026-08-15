@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { addCartItem, addFavorite, removeFavorite, getFavorites } from '../api'
 
 const props = defineProps<{
   product: Record<string, any> | null
@@ -7,6 +8,58 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void }>()
+const cartNotice = ref('')
+const adding = ref(false)
+const favoriteNotice = ref('')
+const favoriting = ref(false)
+const isFavorited = ref(false)
+
+// 打开/切换商品时，查一次当前商品是否已收藏（用于红心状态）
+watch(() => props.product?.product_id, async (pid) => {
+  if (!pid) { isFavorited.value = false; return }
+  try {
+    const favorites = await getFavorites()
+    isFavorited.value = (favorites || []).some((f: any) => f.product_id === pid)
+  } catch {
+    isFavorited.value = false
+  }
+}, { immediate: true })
+
+async function addToCart() {
+  if (!props.product || adding.value) return
+  adding.value = true
+  cartNotice.value = ''
+  try {
+    await addCartItem(String(props.product.product_id), 1)
+    cartNotice.value = '已加入购物车'
+  } catch (error: any) {
+    cartNotice.value = error?.response?.status === 401 ? '请先登录后加入购物车' : '加入购物车失败，请重试'
+  } finally {
+    adding.value = false
+  }
+}
+
+async function toggleFavorite() {
+  if (!props.product || favoriting.value) return
+  favoriting.value = true
+  favoriteNotice.value = ''
+  try {
+    const pid = String(props.product.product_id)
+    if (isFavorited.value) {
+      await removeFavorite(pid)
+      isFavorited.value = false
+      favoriteNotice.value = '已取消收藏'
+    } else {
+      await addFavorite(pid)
+      isFavorited.value = true
+      favoriteNotice.value = '已收藏'
+    }
+  } catch (error: any) {
+    favoriteNotice.value = error?.response?.status === 401 ? '请先登录后收藏' : '操作失败，请重试'
+  } finally {
+    favoriting.value = false
+  }
+}
 
 const imageUrl = computed(() => {
   if (!props.product) return ''
@@ -66,9 +119,15 @@ const imageUrl = computed(() => {
       </p>
 
       <!-- CTA -->
-      <button class="w-full py-3.5 rounded-full bg-[#1d1d1f] text-white text-[15px] font-semibold hover:bg-black transition-colors cursor-pointer">
-        加入购物车
-      </button>
+      <div class="flex gap-3">
+        <button @click="addToCart" :disabled="adding" class="flex-1 py-3.5 rounded-full bg-[#1d1d1f] text-white text-[15px] font-semibold hover:bg-black transition-colors cursor-pointer disabled:opacity-60">
+          {{ adding ? '正在加入…' : '加入购物车' }}
+        </button>
+        <button @click="toggleFavorite" :disabled="favoriting" :class="['shrink-0 w-14 py-3.5 rounded-full border transition-colors cursor-pointer disabled:opacity-60 flex items-center justify-center', isFavorited ? 'text-red-500 border-red-200 bg-red-50' : 'border-hairline bg-surface text-ink-muted hover:text-red-500 hover:border-red-200']" :title="isFavorited ? '取消收藏' : '收藏'">
+          <svg width="18" height="18" viewBox="0 0 24 24" :fill="isFavorited ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/></svg>
+        </button>
+      </div>
+      <p v-if="cartNotice || favoriteNotice" class="mt-2 text-center text-sm text-ink-muted">{{ cartNotice || favoriteNotice }}</p>
     </div>
 
     <div v-else class="h-full flex flex-col items-center justify-center text-center px-6">

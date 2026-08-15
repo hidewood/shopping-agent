@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useChatStore } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 
@@ -9,6 +9,12 @@ const chatRef = ref<HTMLElement>()
 
 onMounted(async () => {
   if (!store.conversationId) await store.init()
+  await nextTick()
+  chatRef.value?.scrollTo({ top: store.scrollTop })
+})
+
+onBeforeUnmount(() => {
+  store.scrollTop = chatRef.value?.scrollTop || 0
 })
 
 async function handleSend() {
@@ -59,7 +65,7 @@ async function handleSend() {
       <!-- 消息流 -->
       <div v-else class="max-w-3xl mx-auto">
         <TransitionGroup name="msg">
-          <ChatMessage v-for="(msg, i) in store.messages" :key="i" :message="msg" />
+          <ChatMessage v-for="(msg, i) in store.messages" :key="i" :message="msg" @retry="store.retry" />
         </TransitionGroup>
 
         <!-- Loading -->
@@ -69,7 +75,8 @@ async function handleSend() {
             <span class="w-1.5 h-1.5 rounded-full bg-accent-400 animate-bounce" style="animation-delay: 150ms"></span>
             <span class="w-1.5 h-1.5 rounded-full bg-accent-400 animate-bounce" style="animation-delay: 300ms"></span>
           </div>
-          <span class="text-sm">正在为你挑选…</span>
+          <span class="text-sm">{{ store.progressText || '正在处理…' }}</span>
+          <button @click="store.cancel" class="ml-2 text-xs text-ink-faint hover:text-ink cursor-pointer">取消</button>
         </div>
       </div>
     </div>

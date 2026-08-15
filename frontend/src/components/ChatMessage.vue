@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import ProductCard from './ProductCard.vue'
 
 const props = defineProps<{
@@ -11,18 +10,13 @@ const props = defineProps<{
     trace?: Record<string, any>[]
     products?: Record<string, any>[]
     alternatives?: Record<string, any>[]
+    bundle?: Record<string, any> | null
+    error?: { code: string; retriable: boolean } | null
+    retryText?: string
+    retryId?: string
   }
 }>()
-
-// 简洁化：推荐类只显示结论首句（中文句号），其余类型显示完整自然语言
-const headline = computed(() => {
-  const content = props.message.content
-  if (props.message.responseType === 'recommendation' || props.message.responseType === 'bundle_recommendation') {
-    const idx = content.indexOf('。')
-    return idx > 0 ? content.slice(0, idx + 1) : content
-  }
-  return content
-})
+const emit = defineEmits<{ (e: 'retry', text: string, requestId?: string): void }>()
 
 </script>
 
@@ -42,11 +36,23 @@ const headline = computed(() => {
     <div class="flex-1 min-w-0 max-w-[80%]">
       <!-- 白色气泡（文字，宽度自适应） -->
       <div class="inline-block max-w-full bg-surface text-ink rounded-[22px] rounded-bl-md px-5 py-3.5 shadow-soft border border-hairline">
-        <p class="text-[15px] leading-relaxed whitespace-pre-wrap">{{ headline }}</p>
+        <p class="text-[15px] leading-relaxed whitespace-pre-wrap">{{ message.content }}</p>
+      </div>
+      <button v-if="message.error?.retriable && message.retryText" @click="emit('retry', message.retryText, message.retryId)"
+        class="mt-2 block text-sm font-medium text-brand-600 hover:text-brand-700 cursor-pointer">
+        重试本次请求
+      </button>
+
+      <!-- 多件推荐按对象分组，避免用户把两张卡片的用途弄混。 -->
+      <div v-if="message.bundle?.items?.length" class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <section v-for="(item, i) in message.bundle.items" :key="item.product?.product_id || i" class="min-w-0">
+          <p class="mb-2 text-sm font-medium text-ink-soft">{{ item.recipient || item.item_type }}{{ item.quantity > 1 ? ` · ${item.quantity} 件` : '' }}</p>
+          <ProductCard v-if="item.product" :product="item.product" variant="primary" />
+        </section>
       </div>
 
-      <!-- 商品卡片（气泡外） -->
-      <div v-if="message.products?.length" class="mt-3">
+      <!-- 单件或候选商品卡片（气泡外） -->
+      <div v-else-if="message.products?.length" class="mt-3">
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <ProductCard
             v-for="(p, i) in message.products"

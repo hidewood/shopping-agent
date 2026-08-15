@@ -13,12 +13,14 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from starter.config import PROJECT_DIR, ConfigurationError, Settings
+from starter.v3_engine import ExecutionContext, SemanticCompilerEngine, normalize_aggregate
 
 
 # ===== schemas.py =====
@@ -198,8 +200,8 @@ class ShoppingRequirement:
     needs_clarification: bool = False
     clarification_question: str | None = None
     # Schema-agnostic constraints keyed by field name.  When the catalog
-    # schema is extended (e.g. books with author/genre), these slots carry
-    # the new fields without requiring code changes to the dataclass.
+    # schema is extended with new product attributes, these slots carry the
+    # new fields without requiring code changes to the dataclass.
     dynamic_constraints: dict[str, DynamicConstraint] = field(default_factory=dict)
 
     @classmethod
@@ -322,6 +324,24 @@ _CONCEPT_SCHEMA: dict[str, Any] = {
     ]
 }
 
+_BUNDLE_LINE_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["item_type"],
+    "properties": {
+        "line_id": {"type": ["string", "null"]},
+        "item_type": {"type": "string"},
+        "quantity": {"type": "integer", "minimum": 1},
+        "recipient": {"type": ["string", "null"]},
+        "manufacturer": _CATALOG_CONSTRAINT_SCHEMA,
+        "price_constraint": {
+            "anyOf": [_PRICE_CONSTRAINT_SCHEMA, {"type": "number"}, {"type": "null"}]
+        },
+        "concepts": {"type": "array", "items": _CONCEPT_SCHEMA},
+        "operation": {"enum": ["upsert", "remove"]},
+    },
+}
+
 TURN_PLAN_JSON_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "Shopping Agent TurnPlan",
@@ -352,6 +372,11 @@ TURN_PLAN_JSON_SCHEMA: dict[str, Any] = {
                     },
                 },
             ]
+        },
+        "line_items": {"type": ["array", "null"], "items": _BUNDLE_LINE_ITEM_SCHEMA},
+        "budget_scope": {"enum": ["per_item", "combined", None]},
+        "budget_constraint": {
+            "anyOf": [_PRICE_CONSTRAINT_SCHEMA, {"type": "number"}, {"type": "null"}]
         },
         "catalog_operations": {"type": ["array", "null"], "items": {"enum": sorted(CATALOG_OPERATIONS)}},
         "state_action": {"enum": ["none", "merge", "replace", None]},
@@ -478,6 +503,9 @@ class TurnPlan:
     selection_mode: str | None = None
     action: str | None = None
     goal_evidence: list[str] = field(default_factory=list)
+    line_items: list["BundleLineItem"] = field(default_factory=list)
+    budget_scope: str | None = None
+    budget_constraint: PriceConstraint = field(default_factory=PriceConstraint)
 
     @classmethod
     def from_dict(cls, data: Any) -> "TurnPlan":
@@ -509,6 +537,22 @@ class TurnPlan:
         requirement = None
         if raw_requirement is not None:
             requirement = ShoppingRequirement.from_dict(raw_requirement)
+        raw_line_items = data.get("line_items") or []
+        if not isinstance(raw_line_items, list):
+            raise LLMResponseError("line_items must be an array.", error_code="invalid_model_output")
+        line_items = [BundleLineItem.from_dict(item) for item in raw_line_items if isinstance(item, dict)]
+        if len(line_items) != len(raw_line_items) or any(
+            item.operation not in {"upsert", "remove"}
+            or (item.operation == "upsert" and not item.item_type)
+            or item.quantity < 1
+            for item in line_items
+        ):
+            raise LLMResponseError("Turn plan has an invalid bundle line item.", error_code="invalid_model_output")
+
+        budget_scope = _optional_text(data.get("budget_scope"))
+        if budget_scope not in {None, "per_item", "combined"}:
+            raise LLMResponseError("Turn plan has an invalid budget_scope.", error_code="invalid_model_output")
+        budget_constraint = PriceConstraint.from_value(data.get("budget_constraint"))
 
         operations = data.get("catalog_operations", [])
         if operations is None:
@@ -536,24 +580,43 @@ class TurnPlan:
         evidence = _deduplicate(item.strip() for item in evidence if item.strip())
 
         if goal == "chat":
-            if target != "none" or not reply or requirement is not None or operations or state_action != "none" or action:
+            if target != "none" or not reply or requirement is not None or line_items or budget_scope or budget_constraint.has_value() or operations or state_action != "none" or action:
                 raise LLMResponseError("A chat plan may only contain a customer reply.", error_code="invalid_model_output")
         elif goal == "selection":
-            if target != "catalog" or reply is not None or requirement is None or operations or state_action not in {"merge", "replace"} or action or selection_mode is None:
+            has_selection_payload = bool(
+                requirement is not None
+                or line_items
+                or budget_scope is not None
+                or budget_constraint.has_value()
+            )
+            if target != "catalog" or reply is not None or not has_selection_payload or operations or state_action not in {"merge", "replace"} or action or selection_mode is None:
                 raise LLMResponseError("A selection plan must contain requirements and a valid state transition.", error_code="invalid_model_output")
         elif goal == "information":
-            if reply is not None or state_action != "none" or action:
+            if reply is not None or line_items or budget_scope or budget_constraint.has_value() or state_action != "none" or action:
                 raise LLMResponseError("An information plan may not reply directly or mutate state.", error_code="invalid_model_output")
             if target == "catalog" and (requirement is None or not operations):
                 raise LLMResponseError("Catalog information requires filters and operations.", error_code="invalid_model_output")
             if target != "catalog" and (requirement is not None or operations):
                 raise LLMResponseError("Product information plan contains incompatible fields.", error_code="invalid_model_output")
         elif goal == "action":
-            if target != "transaction" or reply is not None or requirement is not None or operations or state_action != "none" or action not in TRANSACTION_ACTIONS:
+            if target != "transaction" or reply is not None or requirement is not None or line_items or budget_scope or budget_constraint.has_value() or operations or state_action != "none" or action not in TRANSACTION_ACTIONS:
                 raise LLMResponseError("An action plan must request a supported action vocabulary.", error_code="invalid_model_output")
         else:
             raise LLMResponseError(f"Unknown goal {goal!r}.", error_code="invalid_model_output")
-        return cls(goal, target, reply, requirement, operations, state_action, selection_mode, action, evidence)
+        return cls(
+            goal=goal,
+            target=target,
+            customer_reply=reply,
+            requirement=requirement,
+            catalog_operations=operations,
+            state_action=state_action,
+            selection_mode=selection_mode,
+            action=action,
+            goal_evidence=evidence,
+            line_items=line_items,
+            budget_scope=budget_scope,
+            budget_constraint=budget_constraint,
+        )
 
     @property
     def intent(self) -> str:
@@ -633,12 +696,24 @@ class BundleLineItem:
     item_type: str
     quantity: int = 1
     concepts: list[Concept] = field(default_factory=list)
+    recipient: str | None = None
+    unresolved_concepts: list[str] = field(default_factory=list)
+    line_id: str | None = None
+    manufacturer: CatalogConstraint = field(default_factory=CatalogConstraint)
+    price_constraint: PriceConstraint = field(default_factory=PriceConstraint)
+    operation: str = "upsert"
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "line_id": self.line_id,
             "item_type": self.item_type,
             "quantity": self.quantity,
             "concepts": [asdict(concept) for concept in self.concepts],
+            "recipient": self.recipient,
+            "unresolved_concepts": list(self.unresolved_concepts),
+            "manufacturer": asdict(self.manufacturer),
+            "price_constraint": self.price_constraint.to_dict(),
+            "operation": self.operation,
         }
 
     @classmethod
@@ -648,17 +723,23 @@ class BundleLineItem:
             item_type=str(data.get("item_type", "")),
             quantity=int(data.get("quantity", 1)),
             concepts=[c for c in concepts if c is not None],
+            recipient=_optional_text(data.get("recipient")),
+            unresolved_concepts=_string_list(data.get("unresolved_concepts")),
+            line_id=_optional_text(data.get("line_id")),
+            manufacturer=CatalogConstraint.from_value(data.get("manufacturer"), "hard"),
+            price_constraint=PriceConstraint.from_value(data.get("price_constraint")),
+            operation=_optional_text(data.get("operation")) or "upsert",
         )
 
 
 @dataclass
 class BundlePurchaseContext:
-    """Temporary slots for a multi-item request before one item can be retrieved.
+    """Serializable purchase plan for independently addressable product lines.
 
-    A normal ``ShoppingRequirement`` represents a single product scope.  A
-    simultaneous mug-and-shirt request remains ambiguous until the customer has
-    selected the first product type and explained whether a stated budget applies
-    to each item or to the combined purchase.
+    It is used both while collecting missing fields and after recommendation so
+    later turns can update one line without reconstructing or dropping the rest.
+    ``bundle_context`` is the transient executor view; ``active_purchase_plan``
+    is the durable conversation view.
     """
 
     item_types: list[str] = field(default_factory=list)
@@ -666,6 +747,7 @@ class BundlePurchaseContext:
     selected_item_type: str | None = None
     budget_scope: str | None = None  # per_item | combined
     original_price_constraint: PriceConstraint = field(default_factory=PriceConstraint)
+    status: str = "collecting"  # collecting | ready | recommended | no_match
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -674,6 +756,7 @@ class BundlePurchaseContext:
             "selected_item_type": self.selected_item_type,
             "budget_scope": self.budget_scope,
             "original_price_constraint": self.original_price_constraint.to_dict(),
+            "status": self.status,
         }
 
     @classmethod
@@ -684,7 +767,14 @@ class BundlePurchaseContext:
             selected_item_type=_optional_text(data.get("selected_item_type")),
             budget_scope=_optional_text(data.get("budget_scope")),
             original_price_constraint=PriceConstraint.from_value(data.get("original_price_constraint") or {}),
+            status=str(data.get("status", "collecting")),
         )
+
+
+# Domain-facing names for new code. The historical Bundle* names remain valid
+# so persisted sessions and local test fixtures continue to load unchanged.
+PurchaseLineItem = BundleLineItem
+PurchasePlan = BundlePurchaseContext
 
 
 @dataclass
@@ -906,6 +996,7 @@ class ConversationState:
     turn_count: int = 0
     last_catalog_context: dict[str, Any] | None = None
     bundle_context: BundlePurchaseContext | None = None
+    active_purchase_plan: BundlePurchaseContext | None = None
     task_context: TaskContext = field(default_factory=TaskContext)
     saved_product_ids: list[str] = field(default_factory=list)
     simulated_orders: list[dict[str, Any]] = field(default_factory=list)
@@ -915,6 +1006,9 @@ class ConversationState:
     # example, an omitted SIM-0001).  This is deliberately kept outside the
     # shopping requirement so a cancellation does not overwrite a live search.
     pending_local_action: str | None = None
+    # V3 is the only production shopping-state aggregate. Historical fields
+    # above are retained solely so existing persisted conversations can migrate.
+    v3_aggregate: dict[str, Any] = field(default_factory=dict)
 
     def add_event(self, event_type: str, payload: dict[str, Any]) -> None:
         self.events.append(ConversationEvent(self.turn_count, event_type, payload))
@@ -929,11 +1023,13 @@ class ConversationState:
             "turn_count": self.turn_count,
             "last_catalog_context": dict(self.last_catalog_context or {}),
             "bundle_context": self.bundle_context.to_dict() if self.bundle_context else None,
+            "active_purchase_plan": self.active_purchase_plan.to_dict() if self.active_purchase_plan else None,
             "task_context": self.task_context.to_dict(),
             "saved_product_ids": list(self.saved_product_ids),
             "simulated_orders": [dict(order) for order in self.simulated_orders],
             "preference_profile": self.preference_profile.to_dict(),
             "pending_local_action": self.pending_local_action,
+            "v3_aggregate": deepcopy(self.v3_aggregate),
         }
 
     @classmethod
@@ -948,12 +1044,15 @@ class ConversationState:
         state.last_catalog_context = dict(data.get("last_catalog_context") or {}) or None
         if data.get("bundle_context"):
             state.bundle_context = BundlePurchaseContext.from_dict(data["bundle_context"])
+        if data.get("active_purchase_plan"):
+            state.active_purchase_plan = BundlePurchaseContext.from_dict(data["active_purchase_plan"])
         state.task_context = TaskContext.from_dict(data.get("task_context") or {})
         state.saved_product_ids = list(data.get("saved_product_ids") or [])
         state.simulated_orders = [dict(o) for o in (data.get("simulated_orders") or [])]
         state.preference_profile = PreferenceProfile.from_dict(data.get("preference_profile") or {})
         state.local_collections_loaded = bool(data.get("local_collections_loaded", False))
         state.pending_local_action = _optional_text(data.get("pending_local_action"))
+        state.v3_aggregate = normalize_aggregate(data.get("v3_aggregate"))
         return state
 
 
@@ -1180,8 +1279,7 @@ class Product:
     description: str
     # Schema-agnostic extra fields.  Any key present in the source JSON that
     # is not captured above lands here, so the same Product class can model
-    # books (author, genre), electronics (brand, specs), etc. without code
-    # changes.
+    # future product attributes without code changes.
     properties: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -1860,7 +1958,12 @@ will execute catalog access, state updates, and product selection. The exact key
 goal (chat | information | selection | action), target (none | catalog | product | transaction),
 customer_reply (string or null), requirement (object or null), catalog_operations (array),
 state_action (none | merge | replace), selection_mode (criteria | explicitly_open | null),
-action (order.create | order.cancel | payment.create | null), goal_evidence (array of exact user substrings).
+action (order.create | order.cancel | payment.create | null), goal_evidence (array of exact user substrings),
+line_items (array or null). For two or more independently addressed items, use line_items with item_type,
+quantity, recipient, manufacturer, price_constraint, and only exact supplied catalog tag hints; set
+requirement to null. Use budget_scope (per_item | combined | null) and budget_constraint for a budget
+shared by the plan. If active_purchase_plan is present, update a line by its stable line_id with
+state_action=merge; use operation=remove only for an explicit removal. Never collapse recipients.
 
 The input includes intent_signals to help you classify ambiguous cases. Pay attention to:
 - is_likely_comparison: true when user has 2+ product IDs + comparison words
@@ -1939,7 +2042,7 @@ use case, and suitability are preferences only when the user expresses them as a
 (for example "想买纽约风的衣服" or "a Beach themed mug"), it is hard even without words such as
 "必须". A catalog query treats its stated
 filters as hard in execution. catalog_hint and catalog_tag_hints must be exact supplied catalog values or
-null/an empty list; never invent catalog facts. Multiple catalog_tag_hints inside one concept are alternative
+null/an empty list; never invent catalog facts or silently map an unavailable style to a different tag. Multiple catalog_tag_hints inside one concept are alternative
 catalog mappings for that one concept, not several separate user requirements. Preserve Chinese raw wording
 and use supplied bilingual aliases only when their English canonical value exists in the catalog.
 
@@ -1999,6 +2102,13 @@ def turn_plan_repair_messages(raw_plan: Any, validation_error: str) -> list[dict
             "state_action": ["none", "merge", "replace"],
             "selection_mode": ["criteria", "explicitly_open", None],
             "action": ["order.create", "order.cancel", "payment.create", None],
+            "purchase_plan": {
+                "line_item_keys": [
+                    "line_id", "item_type", "quantity", "recipient", "manufacturer",
+                    "price_constraint", "concepts", "operation",
+                ],
+                "budget_scope": ["per_item", "combined", None],
+            },
         },
     }
     return [
@@ -2106,17 +2216,29 @@ class ShoppingAgent:
         )
         self.model_observability = ModelObservability()
         self.model_circuit_breaker: ModelCircuitBreaker | None = None
+        self.model_timeout_seconds = 120.0
         self._settings_error: str | None = None
         try:
             settings = Settings.from_environment()
             self.llm = DeepSeekClient(settings)
             self.max_candidates = settings.max_candidates
             self.model_circuit_breaker = ModelCircuitBreaker(settings.circuit_breaker_seconds)
+            self.model_timeout_seconds = settings.timeout_seconds
         except (ConfigurationError, LLMResponseError) as exc:
             # A missing or unavailable model is surfaced to the user; no rule-based shopping fallback runs.
             self.llm = None
             self.max_candidates = 8
             self._settings_error = str(exc)
+        self.v3_engine = SemanticCompilerEngine(
+            products=[product.to_dict() for product in self.repository.products],
+            catalog=self.repository.catalog(),
+            item_aliases=self.language_config.item_type_aliases,
+            tag_aliases=self.language_config.tag_aliases,
+            max_candidates=self.max_candidates,
+            # Web users should not wait for the former 120-second diagnostic
+            # ceiling. One optional repair shares this entire bounded budget.
+            model_budget_seconds=min(self.model_timeout_seconds, 30.0),
+        )
 
     def observability_snapshot(self) -> dict[str, Any]:
         """Return aggregate, prompt-free model health data for local diagnostics."""
@@ -2140,7 +2262,12 @@ class ShoppingAgent:
         trace.append({"step": "local_session_store", **result})
 
     def _chat_json(
-        self, messages: list[dict[str, str]], trace: list[dict[str, Any]], *, purpose: str
+        self,
+        messages: list[dict[str, str]],
+        trace: list[dict[str, Any]],
+        *,
+        purpose: str,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Call the provider with bounded circuit protection and traceable latency."""
         if self.llm is None:
@@ -2161,7 +2288,10 @@ class ShoppingAgent:
             )
         started = time.perf_counter()
         try:
-            response = self.llm.chat_json(messages)
+            if isinstance(self.llm, DeepSeekClient):
+                response = self.llm.chat_json(messages, timeout_seconds=timeout_seconds)
+            else:
+                response = self.llm.chat_json(messages)
         except LLMResponseError as exc:
             duration_ms = round((time.perf_counter() - started) * 1000)
             self.model_observability.record_failure(duration_ms, exc.error_code)
@@ -2390,23 +2520,27 @@ class ShoppingAgent:
         }
 
     def run_turn(
-        self, message: str, state: ConversationState | None = None
+        self,
+        message: str,
+        state: ConversationState | None = None,
+        execution_context: ExecutionContext | None = None,
+        store_query: Callable[[str, str | None], dict[str, Any] | None] | None = None,
     ) -> dict[str, Any]:
-        """Run one dialogue turn through the configured model API without a local decision fallback."""
+        """Run one turn through the V3 constrained semantic compiler."""
         state = state or ConversationState()
+        execution_context = execution_context or ExecutionContext(message_id=uuid4().hex)
+        # A rejected model plan may already have touched the in-memory event
+        # log. Preserve the last valid state atomically, rather than trying to
+        # remove just one event type after an exception.
+        before_turn = state.to_dict()
         try:
-            return self._run_turn(message, state)
+            return self._run_turn_v3(message, state, execution_context, store_query)
         except LLMResponseError as exc:
             message = message.strip()
-            # A failed turn must not silently leave partially parsed constraints in memory.
-            state.events = [
-                event
-                for event in state.events
-                if not (
-                    event.turn == state.turn_count
-                    and event.event_type == "constraint_update"
-                )
-            ]
+            restored = ConversationState.from_dict(before_turn)
+            state.__dict__.update(restored.__dict__)
+            state.turn_count += 1
+            state.add_event("user_message", {"message": message, "failed": True})
             trace = list(getattr(exc, "workflow_trace", []))
             trace.append(
                 {
@@ -2505,6 +2639,182 @@ class ShoppingAgent:
                 update_shopping_state=False,
             )
 
+    def _run_turn_v3(
+        self,
+        message: str,
+        state: ConversationState,
+        execution_context: ExecutionContext,
+        store_query: Callable[[str, str | None], dict[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
+        """Execute the sole production path: semantics -> compiler -> executor."""
+        message = message.strip()
+        if not message:
+            state.turn_count += 1
+            state.add_event("user_message", {"message": message})
+            return {
+                "instruction": message,
+                "purchased_product_id": None,
+                "summary": "请先输入购物需求，或回答上一个问题。",
+                "response_type": "clarification",
+                "catalog_data": {"products": [], "alternatives": []},
+                "effects": [],
+                "trace": [{"step": "input_integrity", "status": "clarification_required", "fields": ["message"]}],
+            }
+        if self._looks_like_inverted_price_range(message):
+            state.turn_count += 1
+            state.add_event("user_message", {"message": message})
+            return {
+                "instruction": message,
+                "purchased_product_id": None,
+                "summary": "价格区间的下限不能高于上限。请重新说明，例如“10 元以上、20 元以下”。",
+                "response_type": "clarification",
+                "catalog_data": {"products": [], "alternatives": []},
+                "effects": [],
+                "trace": [{"step": "input_integrity", "status": "clarification_required", "fields": ["price_constraint"]}],
+            }
+        if len(message) > 4000:
+            raise LLMResponseError("Message exceeds the 4000-character limit.", error_code="invalid_input")
+
+        self._migrate_legacy_state(state)
+        recent_messages = self._recent_conversation_messages(state)
+        state.turn_count += 1
+        state.add_event("user_message", {"message": message})
+        trace: list[dict[str, Any]] = [
+            {
+                "step": "conversation_state",
+                "status": "received",
+                "turn": state.turn_count,
+                "workflow": "constrained_semantic_compiler_v3",
+            }
+        ]
+
+        def model_call(
+            messages: list[dict[str, str]], purpose: str, timeout_seconds: float
+        ) -> dict[str, Any]:
+            return self._chat_json(
+                messages,
+                trace,
+                purpose=purpose,
+                timeout_seconds=timeout_seconds,
+            )
+
+        try:
+            result, aggregate = self.v3_engine.run(
+                message,
+                state.v3_aggregate,
+                recent_messages,
+                execution_context,
+                trace,
+                model_call,
+                store_query,
+            )
+        except LLMResponseError as exc:
+            exc.workflow_trace = list(trace)
+            raise
+        state.v3_aggregate = aggregate
+        pending = aggregate.get("pending_clarification") or {}
+        state.pending_question = _optional_text(pending.get("question"))
+        state.pending_fields = [str(pending.get("kind"))] if pending else []
+        state.status = "awaiting_user" if pending else str(result.get("response_type", "completed"))
+        # The V3 aggregate is the only shopping truth. Legacy shopping fields are
+        # cleared after migration so no later code can accidentally revive them.
+        state.bundle_context = None
+        state.active_purchase_plan = None
+        state.pending_local_action = None
+        state.saved_product_ids = []
+        state.simulated_orders = []
+        state.preference_profile = PreferenceProfile()
+        state.task_context = TaskContext()
+        persisted_result = deepcopy(result)
+        persisted_result.pop("effects", None)
+        state.add_event("assistant_message", {"result": persisted_result})
+        result["conversation_state"] = state.to_dict()
+        return result
+
+    def _migrate_legacy_state(self, state: ConversationState) -> None:
+        """One-way adapter for conversations persisted before V3."""
+        aggregate = normalize_aggregate(state.v3_aggregate)
+        if aggregate.get("legacy_migrated"):
+            state.v3_aggregate = aggregate
+            return
+        lines: list[dict[str, Any]] = []
+        legacy = state.active_purchase_plan or state.bundle_context
+        if legacy is not None:
+            for index, item in enumerate(legacy.line_items, 1):
+                lines.append(
+                    {
+                        "line_id": item.line_id or f"line-{index}",
+                        "item_type": item.item_type,
+                        "units": item.quantity,
+                        "recipient": item.recipient,
+                        "manufacturer": item.manufacturer.catalog_hint or item.manufacturer.raw_value,
+                        "constraints": [
+                            {
+                                "raw_value": concept.raw_value,
+                                "strength": concept.constraint_strength,
+                                "catalog_values": list(concept.catalog_tag_hints),
+                            }
+                            for concept in item.concepts
+                        ],
+                        "unit_budget": {
+                            "min": item.price_constraint.min_value,
+                            "max": item.price_constraint.max_value,
+                            "currency": "USD",
+                        }
+                        if item.price_constraint.has_value()
+                        else None,
+                        "candidate_count": 3,
+                        "fulfillment_mode": "one_sku",
+                    }
+                )
+        elif state.events:
+            requirement = self._reduce_requirement(state)
+            if requirement.item_type.raw_value:
+                item_type = self.repository._exact_catalog_value(
+                    requirement.item_type.catalog_hint or requirement.item_type.raw_value,
+                    self.repository.catalog()["item_types"],
+                )
+                if item_type:
+                    lines.append(
+                        {
+                            "line_id": "line-1",
+                            "item_type": item_type,
+                            "units": 1,
+                            "recipient": None,
+                            "manufacturer": requirement.manufacturer.catalog_hint,
+                            "constraints": [
+                                {
+                                    "raw_value": concept.raw_value,
+                                    "strength": concept.constraint_strength,
+                                    "catalog_values": list(concept.catalog_tag_hints),
+                                }
+                                for concept in requirement.concepts
+                            ],
+                            "unit_budget": {
+                                "min": requirement.price_constraint.min_value,
+                                "max": requirement.price_constraint.max_value,
+                                "currency": "USD",
+                            }
+                            if requirement.price_constraint.has_value()
+                            else None,
+                            "candidate_count": 3,
+                            "fulfillment_mode": "one_sku",
+                        }
+                    )
+        if lines and aggregate.get("active_plan") is None:
+            aggregate["active_plan"] = {
+                "plan_id": uuid4().hex[:12],
+                "version": 1,
+                "status": "ready",
+                "lines": lines,
+                "shared_budget": None,
+                "requested_outputs": [],
+                "assumptions": ["migrated_from_legacy_state"],
+            }
+        aggregate["legacy_migrated"] = True
+        state.v3_aggregate = aggregate
+        return
+
         previous = self._reduce_requirement(state)
         if self._is_capability_overview_request(message):
             return self._finish_turn(
@@ -2525,6 +2835,9 @@ class ShoppingAgent:
         local_collection_result = self._handle_local_collection_request(state, message, trace)
         if local_collection_result is not None:
             return local_collection_result
+        bundle_total_result = self._handle_bundle_total_query(state, message, trace)
+        if bundle_total_result is not None:
+            return bundle_total_result
         if self._is_type_agnostic_gift_request(message):
             question = "送礼的话，你想看 mug（马克杯）还是 shirt（T 恤）？也可以补充预算或喜欢的主题。"
             return self._finish_turn(
@@ -2599,13 +2912,43 @@ class ShoppingAgent:
                 line_items=line_items,
                 original_price_constraint=self._price_constraint_from_instruction(message),
             )
+            self._assign_purchase_line_ids(state.bundle_context.line_items)
+            state.active_purchase_plan = deepcopy(state.bundle_context)
+            unresolved_lines = [item for item in line_items if item.unresolved_concepts]
+            if unresolved_lines:
+                available_tags = ", ".join(sorted(self.repository.catalog()["tags"])[:8])
+                details = "；".join(
+                    f"{item.recipient or item.item_type} 的“{item.unresolved_concepts[0]}”"
+                    for item in unresolved_lines
+                )
+                question = (
+                    f"当前商品目录没有可核验的 {details} 标签，因此我不会把它猜成别的风格。"
+                    f"可改用目录中已有主题，例如 {available_tags}；请告诉我对应对象想换成哪一种。"
+                )
+                return self._finish_turn(
+                    state,
+                    message,
+                    None,
+                    trace + [{
+                        "step": "bundle_style_grounding",
+                        "status": "clarification_required",
+                        "unresolved_lines": [item.to_dict() for item in unresolved_lines],
+                    }],
+                    question,
+                    "clarification",
+                    pending_question=question,
+                    pending_fields=["bundle_style"],
+                )
             scope = self._bundle_budget_scope(message)
+            direct_recipient_bundle = self._has_explicit_recipient_bundle_request(message, line_items)
             if (
-                self._wants_bundle_recommendation(message)
-                and scope in {"per_item", "combined"}
-                and state.bundle_context.original_price_constraint.has_value()
+                (self._wants_bundle_recommendation(message) or direct_recipient_bundle)
+                and (
+                    not state.bundle_context.original_price_constraint.has_value()
+                    or scope in {"per_item", "combined"}
+                )
             ):
-                state.bundle_context.budget_scope = scope
+                state.bundle_context.budget_scope = scope or "per_item"
                 if scope == "combined":
                     return self._handle_combined_budget_bundle_recommendation(
                         state,
@@ -2621,7 +2964,7 @@ class ShoppingAgent:
                     state.bundle_context,
                     state.bundle_context.original_price_constraint,
                     trace,
-                    source="direct_per_item_bundle_request",
+                    source="direct_recipient_bundle_request" if direct_recipient_bundle else "direct_per_item_bundle_request",
                 )
             question = (
                 "你这次想同时购买 "
@@ -2678,6 +3021,82 @@ class ShoppingAgent:
             )
         if plan.goal == "action":
             return self._handle_action_request(state, message, plan, trace)
+        if plan.goal == "selection" and (
+            plan.line_items
+            or (
+                state.active_purchase_plan is not None
+                and (plan.budget_constraint.has_value() or plan.budget_scope is not None)
+            )
+        ):
+            update_issue = self._purchase_plan_update_issue(plan, state.active_purchase_plan)
+            if update_issue:
+                return self._finish_turn(
+                    state, message, None,
+                    trace + [{"step": "purchase_plan_identity", "status": "clarification_required"}],
+                    update_issue, "clarification", pending_question=update_issue,
+                    pending_fields=["purchase_line"],
+                )
+            excessive = [
+                item for item in plan.line_items
+                if item.quantity > self.language_config.max_bundle_quantity
+            ]
+            if excessive:
+                question = (
+                    f"每个选购条目最多支持 {self.language_config.max_bundle_quantity} 件。"
+                    "请减少数量后再试。"
+                )
+                return self._finish_turn(
+                    state, message, None,
+                    trace + [{
+                        "step": "purchase_plan_quantity_validation",
+                        "status": "clarification_required",
+                        "line_ids": [item.line_id for item in excessive],
+                    }],
+                    question, "clarification", pending_question=question,
+                    pending_fields=["quantity"],
+                )
+            context = self._purchase_context_from_plan(plan, state, trace)
+            state.bundle_context = context
+            state.active_purchase_plan = deepcopy(context)
+            unresolved = [item for item in context.line_items if item.unresolved_concepts]
+            if unresolved:
+                question = self._purchase_plan_clarification(unresolved)
+                return self._finish_turn(
+                    state,
+                    message,
+                    None,
+                    trace + [{
+                        "step": "purchase_plan_validation",
+                        "status": "clarification_required",
+                        "unresolved_lines": [item.to_dict() for item in unresolved],
+                    }],
+                    question,
+                    "clarification",
+                    pending_question=question,
+                    pending_fields=["bundle_style"],
+                )
+            if not context.line_items:
+                question = "当前采购计划中没有商品。请告诉我想挑选马克杯还是 T 恤。"
+                return self._finish_turn(
+                    state, message, None, trace, question, "clarification",
+                    pending_question=question, pending_fields=["item_type"],
+                )
+            if context.original_price_constraint.has_value() and context.budget_scope is None:
+                question = "这笔预算是每件商品的上限，还是所有商品的合计预算？"
+                return self._finish_turn(
+                    state, message, None, trace, question, "clarification",
+                    pending_question=question, pending_fields=["budget_scope"],
+                )
+            context.budget_scope = context.budget_scope or "per_item"
+            if context.budget_scope == "combined":
+                return self._handle_combined_budget_bundle_recommendation(
+                    state, message, context, context.original_price_constraint, trace,
+                    source="planner_purchase_plan",
+                )
+            return self._handle_bundle_recommendation(
+                state, message, context, context.original_price_constraint, trace,
+                source="planner_purchase_plan",
+            )
         if plan.goal == "information" and plan.target == "catalog":
             return self._handle_catalog_plan(state, message, plan, trace)
         if plan.goal == "information" and plan.target == "product":
@@ -2728,6 +3147,7 @@ class ShoppingAgent:
         # implementation-specific phrases such as "change to".
         replace_selection = has_item_type_change or plan.state_action == "replace"
         if replace_selection:
+            state.active_purchase_plan = None
             trace.append(
                 {
                     "step": "selection_transition",
@@ -3938,6 +4358,11 @@ class ShoppingAgent:
         preference.  Anything less explicit remains unscoped instead of being
         guessed across products.
         """
+        if len(item_types) == 1:
+            personal_lines = self._same_type_recipient_lines(message, item_types[0])
+            if personal_lines:
+                return personal_lines
+
         mentions: list[tuple[int, int, str]] = []
         for item_type in item_types:
             aliases = (item_type, *self.language_config.item_type_aliases.get(item_type, ()))
@@ -3991,6 +4416,55 @@ class ShoppingAgent:
             if item_type not in seen_types
         )
         return line_items
+
+    def _same_type_recipient_lines(self, message: str, item_type: str) -> list[BundleLineItem]:
+        """Split ``one shirt for X, one for Y`` into independently safe lines.
+
+        The parser is deliberately narrow: it acts only when the message names
+        two or more explicit ``一件给…`` recipients.  This avoids guessing that
+        a generic quantity means separate taste profiles, while covering the
+        natural shopping phrasing that previously collapsed into one T-shirt.
+        """
+        recipients = [
+            value.strip()
+            for value in re.findall(r"一件\s*(?:留)?(?:给|送给)\s*([^，。；;、]+)", message)
+            if value.strip()
+        ]
+        if len(recipients) < 2:
+            return []
+
+        lines: list[BundleLineItem] = []
+        for recipient in recipients:
+            variants = [recipient]
+            if recipient.startswith("我") and len(recipient) > 1:
+                variants.append(recipient[1:])
+            if recipient in {"我自己", "自己"}:
+                variants.extend(["我", "自己"])
+            style: str | None = None
+            for variant in _deduplicate(variants):
+                match = re.search(
+                    rf"{re.escape(variant)}\s*喜欢\s*([^，。；;]+?)(?:风格|主题)",
+                    message,
+                    flags=re.IGNORECASE,
+                )
+                if match:
+                    style = match.group(1).strip(" 的")
+                    break
+            tags = self.repository.tags_in_text(style or "")
+            concepts = [
+                Concept(raw_value=tag, kind="theme", constraint_strength="hard", catalog_tag_hints=[tag])
+                for tag in tags
+            ]
+            lines.append(
+                BundleLineItem(
+                    item_type=item_type,
+                    quantity=1,
+                    concepts=concepts,
+                    recipient=recipient,
+                    unresolved_concepts=[style] if style and not tags else [],
+                )
+            )
+        return lines
 
     def _bundle_quantity_before_item(self, prefix: str) -> int:
         """Read an explicit line-item count immediately before a type mention.
@@ -4191,6 +4665,64 @@ class ShoppingAgent:
             ]
         return []
 
+    @staticmethod
+    def _latest_bundle(state: ConversationState) -> dict[str, Any] | None:
+        """Return the latest verified bundle payload without changing selection state."""
+        for event in reversed(state.events):
+            if event.event_type != "assistant_message":
+                continue
+            result = event.payload.get("result", {})
+            if result.get("response_type") != "bundle_recommendation":
+                continue
+            bundle = ((result.get("catalog_data") or {}).get("bundle") or {})
+            if bundle.get("items"):
+                return bundle
+        return None
+
+    @staticmethod
+    def _is_bundle_total_query(message: str) -> bool:
+        lower = message.casefold()
+        chinese = bool(
+            re.search(r"(?:这些|它们|这几件|以上商品).*(?:加起来|合计|总共|一共|总价|多少钱)", lower)
+        )
+        english = bool(
+            re.search(r"(?:these|them|the items).*(?:total|altogether|combined|cost)", lower)
+        )
+        return chinese or english
+
+    def _handle_bundle_total_query(
+        self,
+        state: ConversationState,
+        message: str,
+        trace: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not self._is_bundle_total_query(message):
+            return None
+        bundle = self._latest_bundle(state)
+        if bundle is None:
+            return None
+        try:
+            total = float(bundle.get("total_price"))
+        except (TypeError, ValueError):
+            return None
+        item_count = sum(max(1, int(item.get("quantity", 1))) for item in bundle.get("items", []))
+        return self._finish_turn(
+            state,
+            message,
+            None,
+            trace + [{
+                "step": "bundle_read_only_total",
+                "status": "completed",
+                "line_count": len(bundle.get("items", [])),
+                "item_count": item_count,
+                "total_price": round(total, 2),
+            }],
+            f"这 {item_count} 件商品合计 ${total:.2f}。",
+            "product_information",
+            update_shopping_state=False,
+            update_task_context=False,
+        )
+
     def _wants_bundle_recommendation(self, message: str) -> bool:
         """Recognize an explicit request for one jointly presented product set.
 
@@ -4200,6 +4732,178 @@ class ShoppingAgent:
         stated goal rather than an unsolicited expansion of the task.
         """
         return self._has_intent_term(message, "bundle")
+
+    @staticmethod
+    def _purchase_line_match_key(line_item: BundleLineItem) -> tuple[str, str]:
+        """Return the strongest stable identity available for a purchase line."""
+        if line_item.line_id:
+            return "line_id", _normalize(line_item.line_id)
+        if line_item.recipient:
+            return "recipient", _normalize(line_item.recipient)
+        return "item_type", _normalize(line_item.item_type)
+
+    @staticmethod
+    def _assign_purchase_line_ids(line_items: list[BundleLineItem]) -> None:
+        """Assign deterministic IDs without changing IDs restored from state."""
+        used = {item.line_id for item in line_items if item.line_id}
+        next_index = 1
+        for item in line_items:
+            if item.line_id:
+                continue
+            while f"line-{next_index}" in used:
+                next_index += 1
+            item.line_id = f"line-{next_index}"
+            used.add(item.line_id)
+            next_index += 1
+
+    def _merge_purchase_lines(
+        self,
+        active: BundlePurchaseContext | None,
+        updates: list[BundleLineItem],
+        state_action: str,
+    ) -> list[BundleLineItem]:
+        """Reduce line updates into one complete, independently addressable plan."""
+        if state_action == "replace" or active is None:
+            current: list[BundleLineItem] = []
+        else:
+            current = deepcopy(active.line_items)
+
+        for update in deepcopy(updates):
+            if update.line_id:
+                matches = [
+                    index for index, existing in enumerate(current)
+                    if existing.line_id and _normalize(existing.line_id) == _normalize(update.line_id)
+                ]
+            elif update.recipient:
+                matches = [
+                    index for index, existing in enumerate(current)
+                    if existing.recipient and _normalize(existing.recipient) == _normalize(update.recipient)
+                ]
+            else:
+                # A merge line without an existing ID or recipient is a new
+                # anonymous item, not an instruction to overwrite the first
+                # product of the same type.
+                matches = []
+            if update.operation == "remove":
+                for index in reversed(matches):
+                    current.pop(index)
+                continue
+            update.operation = "upsert"
+            if len(matches) == 1:
+                # Retain the stable ID even if the model addressed the line by recipient.
+                update.line_id = update.line_id or current[matches[0]].line_id
+                current[matches[0]] = update
+            else:
+                current.append(update)
+
+        self._assign_purchase_line_ids(current)
+        return current
+
+    @staticmethod
+    def _purchase_plan_update_issue(
+        plan: TurnPlan,
+        active: BundlePurchaseContext | None,
+    ) -> str | None:
+        """Reject ambiguous or stale line mutations before they touch state."""
+        if plan.state_action != "merge" or not plan.line_items:
+            return None
+        active_lines = active.line_items if active is not None else []
+        for update in plan.line_items:
+            if update.line_id:
+                matches = [item for item in active_lines if item.line_id == update.line_id]
+                if not matches:
+                    return f"找不到要修改的条目 {update.line_id}，请说明对象或重新描述整套需求。"
+            elif update.operation == "remove":
+                if not update.recipient:
+                    return "请说明要移除哪位对象的商品。"
+                matches = [
+                    item for item in active_lines
+                    if item.recipient and _normalize(item.recipient) == _normalize(update.recipient)
+                ]
+                if len(matches) != 1:
+                    return f"无法唯一确定“{update.recipient}”对应的商品，请换一种对象称呼。"
+        return None
+
+    def _purchase_context_from_plan(
+        self,
+        plan: TurnPlan,
+        state: ConversationState,
+        trace: list[dict[str, Any]],
+    ) -> BundlePurchaseContext:
+        """Merge, canonicalize, and ground a model purchase plan before retrieval."""
+        active = state.active_purchase_plan
+        line_items = self._merge_purchase_lines(active, plan.line_items, plan.state_action)
+        for line_item in line_items:
+            requirement = ShoppingRequirement(
+                item_type=CatalogConstraint(
+                    raw_value=line_item.item_type,
+                    constraint_strength="hard",
+                    catalog_hint=line_item.item_type,
+                ),
+                manufacturer=line_item.manufacturer,
+                price_constraint=line_item.price_constraint,
+                concepts=line_item.concepts,
+            )
+            grounded = self.repository.ground(requirement)
+            if grounded.item_type:
+                line_item.item_type = grounded.item_type
+            unresolved = list(grounded.unresolved_hard_constraints)
+            for mapping in grounded.mappings:
+                if mapping.get("field") == "concept" and not mapping.get("canonical_values"):
+                    unresolved.append(str(mapping.get("raw_value") or "未识别偏好"))
+                if mapping.get("field") == "manufacturer" and not mapping.get("canonical_values"):
+                    raw_value = mapping.get("raw_value")
+                    if raw_value:
+                        unresolved.append(str(raw_value))
+            line_item.unresolved_concepts = _deduplicate(
+                [*line_item.unresolved_concepts, *unresolved]
+            )
+
+        budget = (
+            deepcopy(plan.budget_constraint)
+            if plan.budget_constraint.has_value()
+            else deepcopy(active.original_price_constraint)
+            if active is not None and plan.state_action == "merge"
+            else PriceConstraint()
+        )
+        budget_scope = (
+            plan.budget_scope
+            if plan.budget_scope is not None
+            else active.budget_scope
+            if active is not None and plan.state_action == "merge"
+            else None
+        )
+        context = BundlePurchaseContext(
+            item_types=[item.item_type for item in line_items],
+            line_items=line_items,
+            budget_scope=budget_scope,
+            original_price_constraint=budget,
+            status="ready" if not any(item.unresolved_concepts for item in line_items) else "collecting",
+        )
+        trace.append({
+            "step": "purchase_plan_reducer",
+            "status": context.status,
+            "state_action": plan.state_action,
+            "line_count": len(line_items),
+            "line_ids": [item.line_id for item in line_items],
+            "budget_scope": budget_scope,
+            "budget_constraint": budget.to_dict(),
+        })
+        return context
+
+    def _purchase_plan_clarification(self, unresolved: list[BundleLineItem]) -> str:
+        """Ask one compact question covering only unresolved purchase lines."""
+        details = "；".join(
+            f"{item.recipient or item.line_id or item.item_type}：{'、'.join(item.unresolved_concepts)}"
+            for item in unresolved
+        )
+        tags = "、".join(sorted(self.repository.catalog()["tags"])[:8])
+        return f"这些条件无法在商品库中核验：{details}。请改用已有主题，例如 {tags}。"
+
+    @staticmethod
+    def _has_explicit_recipient_bundle_request(message: str, line_items: list[BundleLineItem]) -> bool:
+        """Recognize a requested set of separately addressed products."""
+        return len(line_items) >= 2 and ("分别" in message or message.count("一件") >= 2)
 
     def _handle_bundle_recommendation(
         self,
@@ -4221,6 +4925,7 @@ class ShoppingAgent:
         computed in code.
         """
         selected_products: list[Product] = []
+        used_product_ids: set[str] = set()
         bundle_items: list[dict[str, Any]] = []
         all_candidates: list[Product] = []
         missing_types: list[str] = []
@@ -4235,13 +4940,19 @@ class ShoppingAgent:
             )
         for line_item in line_items:
             item_type = line_item.item_type
+            effective_price = (
+                line_item.price_constraint
+                if line_item.price_constraint.has_value()
+                else price_constraint
+            )
             requirement = ShoppingRequirement(
                 item_type=CatalogConstraint(
                     raw_value=item_type,
                     constraint_strength="hard",
                     catalog_hint=item_type,
                 ),
-                price_constraint=PriceConstraint.from_value(price_constraint.to_dict()),
+                manufacturer=line_item.manufacturer,
+                price_constraint=PriceConstraint.from_value(effective_price.to_dict()),
                 concepts=[
                     Concept(
                         raw_value=concept.raw_value,
@@ -4258,6 +4969,8 @@ class ShoppingAgent:
                     "step": "bundle_catalog_grounding",
                     "status": "completed",
                     "item_type": item_type,
+                    "line_id": line_item.line_id,
+                    "recipient": line_item.recipient,
                     "quantity": line_item.quantity,
                     "grounded_requirements": grounded.to_dict(),
                 }
@@ -4268,6 +4981,8 @@ class ShoppingAgent:
                     "step": "bundle_retrieval_and_hard_filtering",
                     "status": "completed",
                     "item_type": item_type,
+                    "line_id": line_item.line_id,
+                    "recipient": line_item.recipient,
                     "quantity": line_item.quantity,
                     "filter_counts": counts,
                     "eligible_product_count": len(candidates),
@@ -4276,13 +4991,17 @@ class ShoppingAgent:
             if not candidates:
                 missing_types.append(item_type)
                 continue
-            selected = self._rank_with_profile(state, grounded, candidates)[0]
+            ranked = self._rank_with_profile(state, grounded, candidates)
+            selected = next((product for product in ranked if product.product_id not in used_product_ids), ranked[0])
+            used_product_ids.add(selected.product_id)
             selected_products.append(selected)
             all_candidates.extend(candidates)
             bundle_items.append(
                 {
+                    "line_id": line_item.line_id,
                     "item_type": item_type,
                     "quantity": line_item.quantity,
+                    "recipient": line_item.recipient,
                     "line_requirement": requirement.to_dict(),
                     "product": selected.to_dict(),
                     "eligible_product_count": len(candidates),
@@ -4290,6 +5009,8 @@ class ShoppingAgent:
             )
 
         if missing_types:
+            context.status = "no_match"
+            state.active_purchase_plan = deepcopy(context)
             self._clear_bundle_context(state, trace)
             summary = (
                 "无法生成完整组合方案："
@@ -4337,10 +5058,11 @@ class ShoppingAgent:
                 "total_price": total_price,
             }
         )
+        context.status = "recommended"
+        state.active_purchase_plan = deepcopy(context)
         self._clear_bundle_context(state, trace)
-        item_summary = "；".join(
-            f"{item['item_type']}{' ×' + str(item['quantity']) if item['quantity'] > 1 else ''}: "
-            f"{product.name}（{product.product_id}，${product.price:.2f}）"
+        item_summary = "、".join(
+            f"{item.get('recipient') or item['item_type']}：{product.product_id}"
             for product, item in zip(selected_products, bundle_items)
         )
         return self._finish_turn(
@@ -4348,7 +5070,7 @@ class ShoppingAgent:
             message,
             selected_products[0].product_id,
             trace,
-            f"已按每件商品预算生成一套可核验组合：{item_summary}。组合总价 ${total_price:.2f}。",
+            f"已选好 {len(bundle_items)} 项（{item_summary}）。合计 ${total_price:.2f}。",
             "bundle_recommendation",
             catalog_data={
                 "kind": "bundle_recommendation",
@@ -4424,6 +5146,8 @@ class ShoppingAgent:
                     constraint_strength="hard",
                     catalog_hint=item_type,
                 ),
+                manufacturer=line_item.manufacturer,
+                price_constraint=line_item.price_constraint,
                 concepts=[
                     Concept(
                         raw_value=concept.raw_value,
@@ -4443,6 +5167,8 @@ class ShoppingAgent:
                         "step": "bundle_catalog_grounding",
                         "status": "completed",
                         "item_type": item_type,
+                        "line_id": line_item.line_id,
+                        "recipient": line_item.recipient,
                         "quantity": line_item.quantity,
                         "grounded_requirements": grounded.to_dict(),
                     },
@@ -4450,6 +5176,8 @@ class ShoppingAgent:
                         "step": "bundle_retrieval_and_hard_filtering",
                         "status": "completed",
                         "item_type": item_type,
+                        "line_id": line_item.line_id,
+                        "recipient": line_item.recipient,
                         "quantity": line_item.quantity,
                         "filter_counts": counts,
                         "eligible_product_count": len(candidates),
@@ -4547,6 +5275,8 @@ class ShoppingAgent:
         )
         self._clear_bundle_context(state, trace)
         if selected_products is None:
+            context.status = "no_match"
+            state.active_purchase_plan = deepcopy(context)
             return self._finish_turn(
                 state,
                 message,
@@ -4585,9 +5315,10 @@ class ShoppingAgent:
                 "total_price": total_price,
             }
         )
-        item_summary = "；".join(
-            f"{line_item.item_type}{' ×' + str(line_item.quantity) if line_item.quantity > 1 else ''}: "
-            f"{product.name}（{product.product_id}，${product.price:.2f}）"
+        context.status = "recommended"
+        state.active_purchase_plan = deepcopy(context)
+        item_summary = "、".join(
+            f"{line_item.recipient or line_item.item_type}：{product.product_id}"
             for product, line_item in zip(selected_products, line_items)
         )
         return self._finish_turn(
@@ -4595,7 +5326,7 @@ class ShoppingAgent:
             message,
             selected_products[0].product_id,
             trace,
-            f"已按合计预算生成一套可核验组合：{item_summary}。组合总价 ${total_price:.2f}。",
+            f"已选好 {len(line_items)} 项（{item_summary}）。合计 ${total_price:.2f}。",
             "bundle_recommendation",
             catalog_data={
                 "kind": "bundle_recommendation",
@@ -4605,8 +5336,10 @@ class ShoppingAgent:
                     "budget_scope": "combined",
                     "items": [
                         {
+                            "line_id": line_item.line_id,
                             "item_type": line_item.item_type,
                             "quantity": line_item.quantity,
+                            "recipient": line_item.recipient,
                             "line_requirement": ShoppingRequirement(
                                 item_type=CatalogConstraint(
                                     raw_value=line_item.item_type,
@@ -4684,9 +5417,86 @@ class ShoppingAgent:
     ) -> tuple[TurnPlan | None, dict[str, Any] | None]:
         """Require a type and a budget scope before a bundle can retrieve products."""
         context = state.bundle_context
-        bundle_fields = {"item_type", "budget_scope", "item_price_constraint"}
+        bundle_fields = {"item_type", "budget_scope", "item_price_constraint", "bundle_style"}
         if context is None or not bundle_fields.intersection(state.pending_fields):
             return None, None
+
+        if "bundle_style" in state.pending_fields:
+            supplied_tags = self.repository.tags_in_text(message)
+            unresolved = [item for item in context.line_items if item.unresolved_concepts]
+            for item in unresolved:
+                recipient_mentions = [item.recipient or ""]
+                if item.recipient and item.recipient.startswith("我"):
+                    recipient_mentions.append(item.recipient[1:])
+                if item.recipient in {"我自己", "自己"}:
+                    recipient_mentions.extend(["我", "自己"])
+                targets_item = len(unresolved) == 1 or any(
+                    token and token in message for token in recipient_mentions
+                )
+                if targets_item and supplied_tags:
+                    item.concepts = [
+                        Concept(raw_value=tag, kind="theme", constraint_strength="hard", catalog_tag_hints=[tag])
+                        for tag in supplied_tags
+                    ]
+                    item.unresolved_concepts = []
+            still_unresolved = [item for item in context.line_items if item.unresolved_concepts]
+            if still_unresolved:
+                details = "；".join(
+                    f"{item.recipient or item.item_type} 的“{item.unresolved_concepts[0]}”"
+                    for item in still_unresolved
+                )
+                question = f"还需要为 {details} 选择一个目录已有主题；我只会按可核验标签推荐。"
+                return None, self._finish_turn(
+                    state, message, None,
+                    trace + [{"step": "bundle_style_grounding", "status": "awaiting_catalog_tag"}],
+                    question, "clarification", pending_question=question, pending_fields=["bundle_style"],
+                )
+            context.budget_scope = (
+                self._bundle_budget_scope(message) or context.budget_scope or "per_item"
+            )
+            price = self._price_constraint_from_instruction(message)
+            effective_price = price if price.has_value() else context.original_price_constraint
+            state.active_purchase_plan = deepcopy(context)
+            if context.budget_scope == "combined" and effective_price.has_value():
+                return None, self._handle_combined_budget_bundle_recommendation(
+                    state, message, context, effective_price, trace,
+                    source="clarified_purchase_plan_style",
+                )
+            return None, self._handle_bundle_recommendation(
+                state, message, context, effective_price, trace,
+                source="clarified_purchase_plan_style",
+            )
+
+        # A complete purchase plan only needs the scope of an already captured
+        # shared budget. Do not fall back to the old sequential bundle flow and
+        # ask which product type to process first.
+        if (
+            "budget_scope" in state.pending_fields
+            and context.line_items
+            and context.original_price_constraint.has_value()
+            and context.selected_item_type is None
+        ):
+            scope = self._bundle_budget_scope(message)
+            if scope is None:
+                question = "请确认这笔预算按每件计算，还是作为所有商品的合计预算。"
+                return None, self._finish_turn(
+                    state, message, None,
+                    trace + [{"step": "purchase_plan_budget_scope", "status": "awaiting_scope"}],
+                    question, "clarification", pending_question=question,
+                    pending_fields=["budget_scope"],
+                )
+            context.budget_scope = scope
+            context.status = "ready"
+            state.active_purchase_plan = deepcopy(context)
+            if scope == "combined":
+                return None, self._handle_combined_budget_bundle_recommendation(
+                    state, message, context, context.original_price_constraint, trace,
+                    source="clarified_purchase_plan_budget_scope",
+                )
+            return None, self._handle_bundle_recommendation(
+                state, message, context, context.original_price_constraint, trace,
+                source="clarified_purchase_plan_budget_scope",
+            )
 
         mentioned_types = [
             item_type
@@ -5215,8 +6025,23 @@ class ShoppingAgent:
             signals,  # Pass signals to help guide the model
             self.language_config,
         )
+        deadline = time.monotonic() + self.model_timeout_seconds
+
+        def remaining_budget() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining < 1.0:
+                raise LLMResponseError(
+                    "The model planning time budget was exhausted.", error_code="timeout"
+                )
+            return remaining
+
         try:
-            raw_plan = self._chat_json(planner_messages, trace, purpose="turn_planning")
+            raw_plan = self._chat_json(
+                planner_messages,
+                trace,
+                purpose="turn_planning",
+                timeout_seconds=remaining_budget(),
+            )
             try:
                 plan = TurnPlan.from_dict(raw_plan)
                 mismatch = self._strong_signal_plan_mismatch(plan, signals)
@@ -5252,6 +6077,7 @@ class ShoppingAgent:
                     turn_plan_repair_messages(raw_plan, str(exc)),
                     trace,
                     purpose="turn_plan_repair",
+                    timeout_seconds=remaining_budget(),
                 )
                 plan = TurnPlan.from_dict(repaired_plan)
                 repaired_mismatch = self._strong_signal_plan_mismatch(plan, signals)
@@ -5484,6 +6310,11 @@ class ShoppingAgent:
             "pending_shopping_question": state.pending_question,
             "pending_shopping_fields": list(state.pending_fields),
             "task_context": state.task_context.to_dict(),
+            "active_purchase_plan": (
+                state.active_purchase_plan.to_dict()
+                if state.active_purchase_plan is not None
+                else None
+            ),
         }
 
     @staticmethod
@@ -5550,6 +6381,8 @@ class ShoppingAgent:
         messages: list[dict[str, str]] = []
         for event in state.events:
             if event.event_type == "user_message":
+                if event.payload.get("failed"):
+                    continue
                 messages.append({"role": "user", "content": str(event.payload.get("message", ""))})
             elif event.event_type == "assistant_message":
                 result = event.payload.get("result", {})
@@ -5697,21 +6530,18 @@ class ShoppingAgent:
             f"{entry['value']}（{entry['count']} 件）"
             for entry in highlights["top_tags"][:3]
         )
-        tag_sentence = f"常见主题有 {top_tags}。" if top_tags else ""
+        tag_sentence = f"，常见主题有 {top_tags}" if top_tags else ""
         return (
-            f"我先按“{item_type}”帮你浏览了商品库：共有 {highlights['count']} 件，"
-            f"价格从 ${highlights['price_min']:.2f} 到 ${highlights['price_max']:.2f}。"
-            f"{tag_sentence}下面展示了几件价格较低的商品作为参考。{question}"
+            f"找到 {highlights['count']} 件{item_type}，价格 ${highlights['price_min']:.2f}–"
+            f"${highlights['price_max']:.2f}{tag_sentence}。{question}"
         )
 
     @staticmethod
     def _format_summary(
         selected: Product, decision: PurchaseDecision, requirement: GroundedRequirement | None = None
     ) -> str:
-        # 个性化推荐理由：把「为什么推荐它」说成人话，而不是模板化的「已通过校验」。
-        personal = ""
+        reasons: list[str] = []
         if requirement is not None:
-            reasons = []
             matched_tags = [
                 t for t in (requirement.preferred_tags + requirement.required_tags)
                 if t in selected.tags
@@ -5722,19 +6552,16 @@ class ShoppingAgent:
                 reasons.append("在预算内")
             if requirement.preferred_manufacturer and selected.manufacturer == requirement.preferred_manufacturer:
                 reasons.append(f"来自你偏好的厂商 {selected.manufacturer}")
-            if reasons:
-                personal = " 为什么推荐它：" + "，".join(reasons) + "。"
 
-        match_note = ""
+        notes: list[str] = []
+        if reasons:
+            notes.append("符合" + "、".join(reasons))
         if decision.match_level == "closest_alternative":
-            match_note = "偏好条件未能完全验证，以下结果仅保证已满足的硬条件。"
-        summary = (
-            f"推荐 {selected.name}（{selected.product_id}），价格 ${selected.price:.2f}。"
-            f"{personal}{match_note}"
-        )
+            notes.append("偏好未完全匹配")
         if decision.tradeoffs:
-            summary += " 取舍：" + "；".join(decision.tradeoffs) + "。"
-        return summary
+            notes.append("；".join(decision.tradeoffs))
+        suffix = f" {'；'.join(notes)}。" if notes else ""
+        return f"推荐 {selected.name}（{selected.product_id}），${selected.price:.2f}。{suffix}"
 
     @staticmethod
     def _no_match_summary(

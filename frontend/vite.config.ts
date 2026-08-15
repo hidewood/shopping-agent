@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
+    allowedHosts: true, // 允许通过 Cloudflare Tunnel 域名访问（否则 Host 校验会拦 comgender-blog.top）
     proxy: {
       '/api': 'http://localhost:8000',
       '/health': 'http://localhost:8000',
