@@ -139,7 +139,7 @@ def bootstrap_initial_admin() -> None:
     """
     email = os.getenv("ADMIN_EMAIL", "").strip().lower()
     password = os.getenv("ADMIN_INITIAL_PASSWORD", "")
-    if not email or len(password) < 12:
+    if not email or len(password) < 6:
         return
     conn = _connection()
     exists = conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
