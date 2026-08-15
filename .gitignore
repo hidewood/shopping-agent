@@ -13,9 +13,8 @@ htmlcov/
 # Locally generated experiment output
 outputs/
 
-# Local-only diagram sources and rendered documentation visuals
+# Local-only diagram sources (e.g., draw.io source files)
 docs/diagrams/
-docs/images/
 
 # Local-only test suite and test tooling. Test evidence is documented in
 # docs/test-report.md; test code and automation are intentionally not shared.
@@ -58,3 +57,5 @@ frontend/dist/
 ecommerce-sample-set-master/
 
 CLAUDE.md
+AGENTS.md
+.claude/
