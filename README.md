@@ -14,47 +14,47 @@
 - 目录共 **1,740** 件商品：`mug` 870、`shirt` 870；`products.jsonl` 是商品事实源。
 - 不提供真实支付、库存、物流或退换货。订单及管理员发货状态仅用于本地流程演示。
 
-## 本地启动
+## 配置与启动
+
+### 后端
+
+1. 安装依赖并复制环境变量模板：
 
 ```powershell
 pip install -r requirements.txt
 Copy-Item .env.example .env
-# 编辑 .env，至少设置 DEEPSEEK_API_KEY
-python -m uvicorn starter.api:app --reload --port 8000
+```
 
+2. 编辑 `.env`，填写环境变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | （必填） | DeepSeek API key |
+| `DEEPSEEK_MODEL` | `deepseek-v4-pro` | 模型名 |
+| `DEEPSEEK_THINKING_ENABLED` | `false` | 关闭思考模式以降时延 |
+| `DEEPSEEK_TIMEOUT_SECONDS` | `30` | 单轮编译预算（秒） |
+| `DEEPSEEK_MAX_RETRIES` | `0` | SDK 自动重试次数 |
+| `DEEPSEEK_CIRCUIT_BREAKER_SECONDS` | `20` | 连续失败后的熔断冷却（秒） |
+| `JWT_SECRET_KEY` | dev 默认值 | JWT 签名密钥（生产环境须改） |
+| `ADMIN_EMAIL` / `ADMIN_INITIAL_PASSWORD` | 空 | 管理员 bootstrap（见下方「管理员配置」） |
+
+3. 启动后端：
+
+```powershell
+python -m uvicorn starter.api:app --reload --port 8000
+```
+
+### 前端
+
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-打开 `http://localhost:5173`。默认关闭模型思考模式和 SDK 自动重试；语义编译与最多一次无副作用协议修复共享 30 秒预算。前端 3 秒后显示阶段提示，32 秒停止等待；重试复用消息 ID，不会重复收藏、加购或创建订单。
+前端跑在 `http://localhost:5173`，Vite 已配好代理，会把 `/api`、`/auth`、`/cart`、`/orders`、`/favorites`、`/admin`、`/images`、`/avatars`、`/health` 转发到后端 8000，所以只需同时启动前端、后端两个进程即可。
 
-## 部署（Cloudflare Tunnel）
-
-**方案 A：演示（dev server，一个 tunnel 指向前端）**
-
-Vite dev server 已配好代理，会把 `/api`、`/auth`、`/cart`、`/orders`、`/favorites`、`/admin`、`/images`、`/avatars`、`/health` 全部转发到本地 8000。因此只需一个 tunnel 指向前端：
-
-```bash
-# 终端1：后端
-python -m uvicorn starter.api:app --port 8000
-# 终端2：前端
-cd frontend && npm run dev
-# 终端3：tunnel 指向前端（Vite 已设 allowedHosts=true，可通过域名访问）
-cloudflared tunnel run <TUNNEL_ID>
-```
-
-`~/.cloudflared/config.yml` 的 ingress 把域名指向 `http://localhost:5173` 即可。
-
-**方案 B：正式部署（构建前端 + 后端托管，一个 tunnel 指向 8000）**
-
-```bash
-cd frontend && npm run build    # 产出 frontend/dist/
-# 让 FastAPI 托管 dist（api.py 挂载静态文件 + SPA fallback）
-# tunnel 指向 8000
-```
-
-> 注意：方案 A 用的是 dev server，适合演示；长期公开请用方案 B，并考虑给 API 加注册门槛 + 限流，防止他人消耗 DeepSeek 配额。
+默认关闭模型思考模式和 SDK 自动重试；语义编译与最多一次无副作用协议修复共享 30 秒预算。前端 3 秒后显示阶段提示，32 秒停止等待；重试复用消息 ID，不会重复收藏、加购或创建订单。
 
 ## 管理员配置
 
