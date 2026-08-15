@@ -49,6 +49,8 @@
 
 系统的中心思想是**可信边界（Trust Boundary）**：明确「在哪里允许模型自由，在哪里绝对不允许模型自由」。
 
+**图 1：可信边界（Trust Boundary）**
+
 ```mermaid
 flowchart TB
   subgraph Untrusted["不可信区域"]
@@ -85,7 +87,7 @@ flowchart TB
 
 即 **LLM → CODE → LLM**：两侧模型职责完全不同，中间的代码是事实、状态与副作用的唯一来源。
 
-![图 1：工作流流水线——从用户消息到原子提交的完整链路](images/a.png)
+![图 2：工作流流水线——从用户消息到原子提交的完整链路](images/a.png)
 
 ## 3. 语义编译
 
@@ -127,7 +129,7 @@ flowchart TB
 - **澄清重入**：用户回答缺失字段时，模型重建挂起的 `purchase_set`，而非当成全新请求。
 - **版本化快照**：每次变更递增 `plan_version`；快照记录 `catalog_version`，目录变更后旧快照失效。
 
-![图 2：PurchasePlan 状态机——状态转移、中断与重入](images/b.png)
+![图 3：PurchasePlan 状态机——状态转移、中断与重入](images/b.png)
 
 ## 5. 确定性执行与事务
 
@@ -144,7 +146,7 @@ flowchart TB
 - **编译前端（TURN_PROGRAM_SYSTEM）**：用 schema + 规则双重约束模型输出，把边界上的自由裁量权收回到确定性代码（如货币判定、`推荐N款` vs `买N件`、支付→capability、送礼→recipient null、换一批→exclude_shown 等）。
 - **接地渲染（GROUNDED_SUMMARY_SYSTEM）**：把接地后的事实（商品名、标签、价格）喂给模型生成自然语言，铁律是「只使用给定事实、绝不编造」，并区分 `selected`（主推荐）与 `options`（备选）。
 
-![图 3：提示词分层——编译前端、确定性执行与接地生成](images/c.png)
+![图 4：提示词分层——编译前端、确定性执行与接地生成](images/c.png)
 
 ## 7. 实验方法
 

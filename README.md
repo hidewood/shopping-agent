@@ -58,7 +58,9 @@ npm run dev
 
 ## 管理员配置
 
-首次启动前设置 `ADMIN_EMAIL` 和至少 12 位的 `ADMIN_INITIAL_PASSWORD`，系统在该邮箱尚未注册时创建管理员；公开注册永远只创建普通用户。也可用 `set_admin_role(email)` 将已有账号提升为管理员。管理员从普通登录页进入，管理商品、用户及模拟订单的发货/送达状态。凭据只放在本地 `.env`。
+首次启动前在 `.env` 设置 `ADMIN_EMAIL` 和至少 6 位的 `ADMIN_INITIAL_PASSWORD`，系统在该邮箱尚未注册时创建管理员；公开注册永远只创建普通用户。也可用 `set_admin_role(email)` 将已有账号提升为管理员。管理员从普通登录页进入，管理商品、用户及模拟订单的发货/送达状态。凭据只放在本地 `.env`。
+
+**演示环境默认管理员**：账号 `admin123@qq.com`、密码 `123456`（对应 `.env` 里 `ADMIN_EMAIL=admin123@qq.com`、`ADMIN_INITIAL_PASSWORD=123456`）。
 
 登录会话默认使用第一条消息作为标题，也可在「历史会话」中重命名。游客会话由 `X-Conversation-Token` 保护，不能执行账户操作。
 
